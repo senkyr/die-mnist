@@ -2,6 +2,13 @@
 
 Tento projekt obsahuje šest na sebe navazujících aplikací pro sběr, slučování, syntetické generování, učení modelu a testování nad vlastní variantou datasetu ručně psaných číslic.
 
+## Upozornění
+
+- **Co je ověřené během (9. 11. 2026, PyTorch 2.15 CPU, Python 3.13):** všech 90 unit testů včetně těch s torch (načtení starších `digit_cnn.pt`, `train.py` s chybnou `--data_dir` nezaloží běh). Dále DigitDreamer, `train.py` na datech rozdělených do složek i na ploché složce, `dispatch.py` bez oken a DigitTester bez okna vizualizace. Z dávek prošel celý `DigitLearner\run.bat train` (založení venv `torch` v `%TEMP%`, instalace, trénink, dispatch) a `ensure_venv.bat` včetně obnovy po částečném smazání venv. Neověřené zůstává ovládání oken (Collector, Composer, Teaser, marshall, vizualizace) a `start_*.bat` v celku.
+- **Běhy z DigitLearneru nově obsahují `data.json`** (na jakých datech se učily). DigitTester podle něj pozná vzorky, které model viděl při učení, a varuje. Starší běhy ho nemají a kontrola u nich chybí.
+- **DigitTester nově měří ve výchozím stavu jen na `test` splitu.** Dřív výchozí „kompletní dataset“ zahrnoval i train a val, takže přesnost vycházela nadsazeně. Nová čísla proto budou nižší než dřívější.
+- **Invertované vzorky** (světlé pozadí, tmavý tah): DigitDreamer jich ve výchozím stavu přidává 15 % (`--invert_prob 0.15`, bez nich `--invert_prob 0`), DigitCollector je ukládá se zatržítkem „Negovat barvy“. DigitTeaser kreslí vždy světle na tmavém.
+
 ## Aplikace
 
 ### DigitCollector
@@ -18,7 +25,15 @@ Generuje syntetické číslice z geometrických tvarů. Výstupní formát kompa
 
 ### DigitLearner
 
-Trénuje konvoluční síť SimpleCNN na datech z předchozích nástrojů. Ukládá model i průběh učení. Obsahuje GUI editor konfigurace (`marshall`).
+Trénuje konvoluční síť **SimpleCNN** (3× Conv2d+BatchNorm+ReLU+MaxPool → 2× Linear, 32×32 vstup, 10 tříd) na datech z `shared/data/composed/`. Pokud datová složka obsahuje podsložky `train/val/test`, použije toto rozdělení; jinak data náhodně rozdělí podle poměrů z konfigurace. Každý běh ukládá do `shared/models/run_<timestamp>/` váhy (`digit_cnn.pt`), použitou konfiguraci (`config.json`), historii učení (`training_history.json`) a metriky z testu (`test_metrics.json`).
+
+Skládá se ze tří skriptů s „železniční" metaforou:
+
+- **`marshall.py`** – GUI editor hyperparametrů (epochy, batch size, learning rate, poměry val/test, dropout, StepLR step/gamma, seed), ukládá do `config.json`.
+- **`train.py`** – samotný trénink (Adam + CrossEntropy + StepLR), ukládá nejlepší model podle validační loss.
+- **`dispatch.py`** – po tréninku automaticky vizualizuje architekturu, naučené konvoluční filtry a feature mapy ukázkové číslice (matplotlib okna).
+
+Defaultní průchod `run.bat` spustí `marshall` → `train` → `dispatch`.
 
 ### DigitTeaser
 
@@ -26,7 +41,11 @@ Interaktivní GUI aplikace pro real-time vizualizaci klasifikace. Umožňuje kre
 
 ### DigitTester
 
-Nástroj pro kvantifikované testování natrénovaných modelů s interaktivní grafickou vizualizací. Nabízí výběr modelu a testovacích dat, vypočítá detailní metriky (overall accuracy, per-class precision/recall/F1-score, confusion matrix) a automaticky zobrazí výsledky v GUI. Klikací confusion matrix umožňuje prozkoumat konkrétní příklady chyb modelu. Výsledky lze exportovat jako grafy (PNG) nebo JSON. Vhodný pro seriózní evaluaci a porovnávání modelů.
+CLI nástroj pro kvantifikované testování natrénovaných modelů s navazující grafickou vizualizací. V konzoli interaktivně nabídne výběr modelu (nebo se zadá přes `--model_dir`) a testovacích dat (`test` split – výchozí a jediný poctivý odhad / kompletní dataset / `train`+`val` pro kontrolu přeučení). Vypočítá detailní metriky (overall accuracy, per-class precision/recall/F1-score, confusion matrix), uloží je jako JSON do `shared/tests/` a automaticky otevře vizualizaci (matplotlib). Klikací confusion matrix umožňuje prozkoumat konkrétní příklady chyb modelu, grafy lze exportovat jako PNG. Vhodný pro seriózní evaluaci a porovnávání modelů.
+
+### (OLD)MNIST – referenční baseline
+
+Samostatná, na zbytek pipeline nenavázaná složka. Klasická „ML Hello World" implementace nad hotovým MNIST datasetem (`mnist.py` stáhne data přes torchvision a natrénuje CNN, `show_data.py` prohlíží dataset, `show_model.py` vizualizuje model). Slouží jako srovnání „použít hotové API" vs. „postavit celou pipeline od nuly" a jako demonstrace problému *dying ReLU* u staré architektury bez BatchNorm. Detaily v `(OLD)MNIST/README.md`.
 
 ## Struktura projektu
 
@@ -58,7 +77,9 @@ DIE-MNIST/
 │   └── tests/                # Výsledky testování
 │       ├── test_results_20251024_120000.json  # ← DigitTester ukládá sem
 │       └── ...
-└── [nástroje s izolovanými .venv]
+├── die_common/               # Sdílený kód: cesty, hyperparametry, procházení dat, SimpleCNN
+├── tests/                    # Unit testy (python -m unittest discover -s tests)
+└── [nástroje; virtuální prostředí jsou mimo projekt v %TEMP%\DIE-MNIST]
 ```
 
 ### Workflow
@@ -105,7 +126,7 @@ start_dream.bat
 
 Automaticky provede: **DigitDreamer** → **DigitComposer** → **DigitLearner** → **DigitTester**
 
-Workflow skripty automaticky řetězí jednotlivé nástroje, přeskakují pauzy mezi kroky a na konci zobrazí vizualizaci výsledků testování.
+Workflow skripty automaticky řetězí jednotlivé nástroje, přeskakují pauzy mezi kroky a na konci zobrazí vizualizaci výsledků testování. V DigitComposeru stačí při ukládání potvrdit předvybranou složku `shared\data\composed`. Když do ní Composer nic nezapíše, workflow se zastaví, protože DigitLearner by neměl data.
 
 ### Ruční spuštění jednotlivých nástrojů
 
@@ -118,7 +139,9 @@ Pro nezávislé spuštění konkrétního nástroje:
 - `DigitTeaser\run.bat` – interaktivní testování modelu kreslením
 - `DigitTester\run.bat [volby]` – kvantifikované testování s vizualizací
 
-Každý skript automaticky vytvoří a znovu použije izolované virtuální prostředí (`.venv`). Je potřeba mít nainstalovaný Python 3.10+ dostupný v proměnné `PATH`.
+Každý skript si připraví virtuální prostředí sám. Nástroje sdílejí dvě: `base` (DigitCollector, Composer, Dreamer) a `torch` (DigitLearner, Tester, Teaser), se závislostmi v `die_common\requirements-base.txt` a `requirements-torch.txt`. Leží v dočasné složce uživatele `%TEMP%\DIE-MNIST\venv-<druh>`, ne v projektu. Projekt bývá v OneDrive a venv s PyTorch (stovky MB, tisíce souborů) se do něj synchronizoval a na jiném stroji nefungoval. Windows obsah TEMP občas maže, a to po souborech. Před každým spuštěním proto `die_common\venv_check.py` ověří, že na disku jsou všechny soubory nainstalovaných balíčků (zhruba 4 s u torch). Chybí-li něco, venv se založí znovu, chybí-li jen celý balíček, doinstaluje se. První spuštění torch nástroje stahuje několik set MB a trvá několik minut. `pip install` se jinak spouští jen při změně requirements (otisk SHA256 ve venv). Společnou logiku drží `die_common\ensure_venv.bat`.
+
+> **Poznámka:** Skripty (`run.bat`, `start_collect.bat`, `start_dream.bat`) jsou psané pro **Windows** (dávkové soubory). Hlavní závislosti jsou `torch`, `numpy`, `Pillow`, `tqdm` a `matplotlib` (`torchvision` potřebuje jen referenční `(OLD)MNIST`); sběrné GUI nástroje (DigitCollector/Composer/Teaser) navíc potřebují `tkinter` (součást standardní instalace Pythonu na Windows).
 
 ---
 

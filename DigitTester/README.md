@@ -13,12 +13,10 @@ CLI nástroj pro kvantifikované testování natrénovaných modelů z DigitLear
 ## Instalace
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Nejrychlejší je spustit `run.bat`, který všechno připraví automaticky.
+Pohodlnější je spustit `run.bat`: připraví sdílené virtuální prostředí `%TEMP%\DIE-MNIST\venv-torch` mimo projekt (viz hlavní README) a závislosti do něj instaluje, jen když chybí nebo se změnily. Ruční `pip install -r requirements.txt` instaluje do právě aktivního prostředí.
 
 ## Spuštění
 
@@ -33,7 +31,7 @@ run.bat
 Skript se vás zeptá:
 
 1. **Který model testovat?** - Zobrazí seznam všech modelů s metrikami
-2. **Jaká data použít?** - Kompletní dataset (doporučeno) nebo jen test split
+2. **Jaká data použít?** - Test split (výchozí, poctivý odhad), kompletní dataset, nebo train+val
 
 Po testování se automaticky otevře vizualizační okno s grafy.
 
@@ -46,15 +44,17 @@ run.bat --model_dir ../shared/models/run_YYYYMMDD_HHMMSS --data_dir ../shared/da
 Nebo přímé spuštění Pythonu:
 
 ```bash
-python main.py --model_dir ../shared/models/run_20251024_100000 --data_dir ../shared/data/composed
+python main.py --model_dir ../shared/models/run_20251024_100000 --data_dir ../shared/data/composed/test
 ```
+
+`--data_dir` na celý `composed/` (bez `/test`) vyhodnotí všechny splity včetně trénovacích dat; Tester na to upozorní, přesnost bude nadsazená.
 
 ## Příkazové řádkové parametry
 
 ### Základní parametry
 
-- `--model_dir PATH` - Cesta ke složce s natrénovaným modelem (musí obsahovat `config.json` a `digit_cnn.pt`). Pokud není zadána, automaticky se použije nejnovější model z `../shared/models/`
-- `--data_dir PATH` - Cesta k testovacím datům (struktura `0/`, `1/`, ..., `9/` s BMP soubory). Default: interaktivní výběr
+- `--model_dir PATH` - Cesta ke složce s natrénovaným modelem (musí obsahovat `config.json` a `digit_cnn.pt`). Pokud není zadána, nabídne se seznam modelů z `../shared/models/` (Enter = nejnovější)
+- `--data_dir PATH` - Cesta k testovacím datům (struktura `0/`, `1/`, ..., `9/` s BMP soubory, např. `composed/test`; složka s `train/val/test` se vyhodnotí celá a Tester varuje). Default: interaktivní výběr
 
 ### Volitelné parametry
 
@@ -141,6 +141,8 @@ Aplikace vypíše do konzole:
 
 ### JSON výstup
 
+`seen_in_training` je počet vyhodnocovaných vzorků, které model viděl při učení (podle `data.json` běhu; `null` u starších běhů bez něj). `seen_warning` je `true`, když měla data být pro model nová (test split nebo jiná složka), a přesto je zčásti viděl. Varování se pak ukáže i v konzoli a ve vizualizaci.
+
 Všechny metriky se automaticky ukládají do centrální složky `../shared/tests/` jako JSON soubor s časovým razítkem ve formátu `test_results_YYYYMMDD_HHMMSS.json`:
 
 ```json
@@ -153,6 +155,8 @@ Všechny metriky se automaticky ukládají do centrální složky `../shared/tes
   "overall_accuracy": 0.9523,
   "average_loss": 0.1847,
   "total_samples": 1000,
+  "seen_in_training": 0,
+  "seen_warning": false,
   "num_classes": 10,
   "per_class_metrics": {
     "0": {
@@ -192,7 +196,7 @@ run.bat
 **Interaktivní výběr:**
 
 1. Vyberte model ze seznamu (Enter = nejnovější)
-2. Vyberte testovací data (Enter = kompletní dataset)
+2. Vyberte testovací data (Enter = test split)
 3. Počkejte na dokončení testování
 4. Automaticky se otevře vizualizace s grafy
 
@@ -281,9 +285,9 @@ Matice záměn ukazuje, jak často model pletl jednotlivé třídy:
 ## Tipy
 
 1. **Použijte interaktivní výběr dat**:
-   - Testujte na **kompletním datasetu** (doporučeno) pro realistický pohled
-   - Testujte na **test split** pro reprodukci výsledků z tréninku
-   - Testujte na **train+val** pro detekci přeučení
+   - Testujte na **test split** (výchozí) – jediná data, která model při učení neviděl, takže jen tady je přesnost poctivým odhadem
+   - **Kompletní dataset** obsahuje i trénovací data – přesnost vyjde nadsazená, hodí se jen pro procházení chyb
+   - **Train+val** porovnejte s test splitem – velký rozdíl znamená přeučení
 
 2. **Prozkoumejte chyby ve vizualizaci**:
    - Klikejte na confusion matrix → Uvidíte konkrétní příklady chyb

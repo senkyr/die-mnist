@@ -10,15 +10,11 @@ DigitCollector inteligentně vyvažuje dataset během sběru - **méně zastoupe
 
 ```bash
 
-python -m venv .venv
-
-.venv\Scripts\activate
-
 pip install -r requirements.txt
 
 ```
 
-Pohodlnější je spustit `run.bat`, který virtuální prostředí i závislosti připraví automaticky.
+Pohodlnější je spustit `run.bat`: připraví sdílené virtuální prostředí `%TEMP%\DIE-MNIST\venv-base` mimo projekt (viz hlavní README) a závislosti do něj instaluje, jen když chybí nebo se změnily. Ruční `pip install -r requirements.txt` instaluje do právě aktivního prostředí.
 
 ## Spuštění
 
@@ -29,6 +25,13 @@ run.bat
 ```
 
 Otevře se okno s kreslicím plátnem. Levým tlačítkem myši kreslete číslici, `Escape` vymaže plátno a `Enter` uloží aktuální kresbu do `digits/<cílová číslice>/xxxx.bmp`.
+
+Pod plátnem jsou dvě zatržítka, která se uplatní při uložení:
+
+- **Přidávat šum** – přidá Gaussův šum a mírně zesvětlí pozadí.
+- **Negovat barvy** – uloží negativ: světlé pozadí a tmavý tah, jako invertované vzorky DigitDreameru (`--invert_prob`). Se šumem se nejdřív přidá šum, pak se negují barvy.
+
+Je-li některé zaškrtnuté, plátno na okamžik ukáže, co se skutečně uložilo.
 
 Krátký stisk mezerníku přepne pohled na statistiku nasbíraných číslic, podržení mezerníku statistiku zobrazí pouze dočasně.
 

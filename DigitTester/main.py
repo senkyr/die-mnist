@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -30,39 +31,26 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-class SimpleCNN(nn.Module):
-    """Malá konvoluční síť vhodná pro 32x32 číslice."""
+from die_common.data import (  # noqa: E402
+    NUM_CLASSES,
+    TRAIN_VAL_MARKER,
+    collect_samples,
+    count_seen,
+    detect_data_structure,
+    is_split_layout,
+    read_data_info,
+    resolve_eval_dirs,
+    seen_digests,
+)
+from die_common.model import load_model as load_weights  # noqa: E402
+from die_common.paths import COMPOSED_DIR, MODELS_DIR, TESTS_DIR, find_model_runs  # noqa: E402
 
-    def __init__(self, num_classes: int = 10, dropout: float = 0.2) -> None:
-        super().__init__()
-        self.dropout = dropout
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 16x16
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 8x8
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 4x4
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128 * 4 * 4, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout),
-            nn.Linear(128, num_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
+DEFAULT_MODELS_DIR = MODELS_DIR
+DEFAULT_DATA_BASE = COMPOSED_DIR
+DEFAULT_TESTS_DIR = TESTS_DIR
 
 
 class DigitDataset(Dataset):
@@ -78,15 +66,7 @@ class DigitDataset(Dataset):
 
     def _load_samples(self) -> None:
         for root_dir in self.root_dirs:
-            if not root_dir.exists():
-                raise FileNotFoundError(f"Složka s daty '{root_dir}' neexistuje.")
-
-            for label in range(10):
-                class_dir = root_dir / str(label)
-                if not class_dir.exists():
-                    continue
-                for img_path in sorted(class_dir.glob("*.bmp")):
-                    self.samples.append((img_path, label))
+            self.samples.extend(collect_samples(root_dir, strict=False))
 
         if not self.samples:
             raise ValueError(f"V zadaných složkách nejsou žádná .bmp data.")
@@ -120,12 +100,9 @@ def load_model(model_dir: Path, device: torch.device) -> Tuple[nn.Module, Dict]:
         config = json.load(f)
 
     dropout = config.get("dropout", 0.2)
-    num_classes = config.get("num_classes", 10)
+    num_classes = config.get("num_classes", NUM_CLASSES)
 
-    model = SimpleCNN(num_classes=num_classes, dropout=dropout)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
-    model.eval()
+    model = load_weights(model_path, num_classes=num_classes, dropout=dropout, device=device)
 
     return model, config
 
@@ -272,8 +249,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data_dir",
         type=Path,
-        default=Path("..") / "shared" / "data" / "composed" / "test",
-        help="Cesta k testovacím datům (default: interaktivní výběr)",
+        default=None,
+        help="Cesta k testovacím datům (default: interaktivní výběr v ../shared/data/composed/)",
     )
     parser.add_argument(
         "--batch_size",
@@ -341,72 +318,51 @@ def get_model_info(model_dir: Path) -> Dict:
     return info
 
 
-def detect_data_structure(data_dir: Path) -> Dict:
-    """Detekuje strukturu datasetu a vrátí informace o splits."""
-    info = {
-        "has_splits": False,
-        "splits": {},
-        "total": 0,
-    }
+def report_seen_samples(model_dir: Path, selected_path: Path, dataset: DigitDataset) -> Tuple[Optional[int], bool]:
+    """Kolik vyhodnocovaných vzorků model viděl při učení (train/val podle data.json běhu).
 
-    if not data_dir.exists():
-        return info
+    Vypíše varování, když jde o data, která měla být pro model nová (test split
+    nebo jiná složka), a přesto je zčásti viděl – typicky po přeskládání
+    composed/ Composerem až po tréninku. Vrací (počet nebo None u běhu bez
+    data.json, zda se varovalo).
+    """
+    info = read_data_info(model_dir)
+    if info is None:
+        print("Poznámka: model nemá data.json (starší běh), nelze ověřit, "
+              "jestli testovací data neviděl při učení.")
+        return None, False
 
-    # Check if it has train/val/test structure
-    train_dir = data_dir / "train"
-    val_dir = data_dir / "val"
-    test_dir = data_dir / "test"
+    seen = count_seen((path for path, _ in dataset.samples), seen_digests(info))
+    total = len(dataset)
+    print(f"Model se učil na: {info.get('data_dir', '?')}")
+    print(f"Vzorky, které model viděl při učení (train/val): {seen} z {total}")
+    deliberate = selected_path.name == TRAIN_VAL_MARKER or is_split_layout(selected_path)
+    warn = bool(seen) and not deliberate
+    if warn:
+        print()
+        print(f"POZOR: {seen} z {total} testovacích vzorků model viděl při učení, "
+              "přesnost bude nadsazená.")
+        print("Data se nejspíš od tréninku přeskládala (DigitComposer) nebo obsahují kopie. "
+              "Pro poctivý odhad model znovu natrénujte.")
+    return seen, warn
 
-    if train_dir.exists() and train_dir.is_dir():
-        info["has_splits"] = True
 
-        # Count samples in each split
-        for split_name, split_dir in [("train", train_dir), ("val", val_dir), ("test", test_dir)]:
-            if split_dir.exists() and split_dir.is_dir():
-                count = 0
-                for digit in range(10):
-                    digit_dir = split_dir / str(digit)
-                    if digit_dir.exists():
-                        count += len(list(digit_dir.glob("*.bmp")))
-                info["splits"][split_name] = count
-                info["total"] += count
+def warn_full_dataset(selected_path: Path) -> bool:
+    """Varuje, když --data_dir ukazuje na kořen se splity: testuje se i na train/val.
 
-    else:
-        # Flat structure (just 0-9 directories)
-        count = 0
-        for digit in range(10):
-            digit_dir = data_dir / str(digit)
-            if digit_dir.exists():
-                count += len(list(digit_dir.glob("*.bmp")))
-        info["total"] = count
-
-    return info
+    Interaktivní nabídka to u volby „Kompletní dataset“ říká, CLI dřív mlčelo.
+    """
+    if not is_split_layout(selected_path):
+        return False
+    print(f"POZOR: {selected_path} obsahuje train/val/test a testuje se na všech splitech včetně dat, "
+          "na kterých se model učil – přesnost bude nadsazená.")
+    print(f"Pro poctivý odhad použijte --data_dir {Path(selected_path) / 'test'}")
+    return True
 
 
 def create_test_dataset(selected_path: Path) -> DigitDataset:
-    """Vytvoří dataset na základě vybrané cesty."""
-    if selected_path.name == "train+val":
-        # Special case: combine train and val
-        base_dir = selected_path.parent
-        dirs_to_load = []
-        for split in ["train", "val"]:
-            split_dir = base_dir / split
-            if split_dir.exists():
-                dirs_to_load.append(split_dir)
-        return DigitDataset(dirs_to_load)
-
-    # Check if it's a directory with train/val/test subdirs (user selected "all")
-    if (selected_path / "train").exists():
-        # Load all splits
-        dirs_to_load = []
-        for split in ["train", "val", "test"]:
-            split_dir = selected_path / split
-            if split_dir.exists():
-                dirs_to_load.append(split_dir)
-        return DigitDataset(dirs_to_load)
-
-    # Otherwise, just load the selected directory
-    return DigitDataset([selected_path])
+    """Vytvoří dataset na základě vybrané cesty (viz die_common.data.resolve_eval_dirs)."""
+    return DigitDataset(resolve_eval_dirs(selected_path))
 
 
 def select_test_data_interactive(base_data_dir: Path) -> Optional[Path]:
@@ -446,23 +402,22 @@ def select_test_data_interactive(base_data_dir: Path) -> Optional[Path]:
     options = []
     option_paths = []
 
-    # Option 1: Complete dataset
-    options.append(f"1. Kompletní dataset ({structure['total']} vzorků) [DOPORUČENO]")
-    options.append("   → Testuje na všech nasbíraných datech")
-    option_paths.append("all")
-
-    # Option 2: Only test split (if exists)
+    # Poctivý odhad přesnosti dává jen test split – train i val model během
+    # učení viděl (val vybírá nejlepší epochu), takže výsledek nadsazují.
     if "test" in splits and splits["test"] > 0:
-        options.append(f"\n2. Pouze test split ({splits['test']} vzorků)")
-        options.append("   → Reprodukce výsledků z tréninku")
         option_paths.append("test")
+        options.append(f"{len(option_paths)}. Pouze test split ({splits['test']} vzorků) [DOPORUČENO]")
+        options.append("   → Data, která model při učení neviděl – poctivý odhad přesnosti")
 
-    # Option 3: Train + Val (if exists)
+    option_paths.append("all")
+    options.append(f"\n{len(option_paths)}. Kompletní dataset ({structure['total']} vzorků)")
+    options.append("   → Obsahuje i trénovací data, přesnost bude nadsazená")
+
     train_val_count = splits.get("train", 0) + splits.get("val", 0)
     if train_val_count > 0:
-        options.append(f"\n3. Train + Val splits ({train_val_count} vzorků)")
-        options.append("   → Data, která model viděl během učení")
         option_paths.append("train+val")
+        options.append(f"\n{len(option_paths)}. Train + Val splits ({train_val_count} vzorků)")
+        options.append("   → Data, která model viděl během učení (kontrola přeučení)")
 
     for opt in options:
         print(opt)
@@ -473,10 +428,10 @@ def select_test_data_interactive(base_data_dir: Path) -> Optional[Path]:
     # Get user choice
     while True:
         try:
-            choice = input(f"Vyberte [1-{len(option_paths)}] (Enter = kompletní dataset): ").strip()
+            default_label = "test split" if option_paths[0] == "test" else "kompletní dataset"
+            choice = input(f"Vyberte [1-{len(option_paths)}] (Enter = {default_label}): ").strip()
 
             if choice == "":
-                # Default: complete dataset
                 choice = "1"
 
             choice_num = int(choice)
@@ -508,18 +463,18 @@ def select_test_data_interactive(base_data_dir: Path) -> Optional[Path]:
 def select_model_interactive(models_dir: Path) -> Optional[Path]:
     """Interaktivní výběr modelu ze seznamu."""
     if not models_dir.exists():
-        print("Chyba: Složka ../shared/models/ neexistuje")
+        print(f"Chyba: Složka {models_dir} neexistuje")
         print("Spusťte nejprve DigitLearner nebo zadejte --model_dir explicitně")
         return None
 
     run_dirs = sorted(
-        [p for p in models_dir.glob("run_*") if p.is_dir()],
+        find_model_runs(models_dir),
         key=lambda p: p.name,
         reverse=True
     )
 
     if not run_dirs:
-        print("Chyba: Žádné modely nenalezeny v ../shared/models/")
+        print(f"Chyba: Žádné modely nenalezeny v {models_dir}")
         print("Spusťte nejprve DigitLearner nebo zadejte --model_dir explicitně")
         return None
 
@@ -567,16 +522,16 @@ def select_model_interactive(models_dir: Path) -> Optional[Path]:
             return None
 
 
-def main() -> None:
+def main() -> int:
+    """Vrací kód procesu: 1, když se nic netestovalo (start_*.bat jinak hlásil úspěch)."""
     args = parse_args()
 
     # Select model if not specified
     if args.model_dir is None:
-        models_dir = Path("..") / "shared" / "models"
-        args.model_dir = select_model_interactive(models_dir)
+        args.model_dir = select_model_interactive(DEFAULT_MODELS_DIR)
 
         if args.model_dir is None:
-            return
+            return 1
 
     # Determine device
     if args.use_cpu:
@@ -592,17 +547,16 @@ def main() -> None:
     num_classes = config.get("num_classes", 10)
 
     # Select test data if not specified via CLI
-    if args.data_dir == Path("..") / "shared" / "data" / "composed" / "test":
-        # Default path - offer interactive selection
-        base_data_dir = Path("..") / "shared" / "data" / "composed"
-        selected_data_path = select_test_data_interactive(base_data_dir)
+    if args.data_dir is None:
+        selected_data_path = select_test_data_interactive(DEFAULT_DATA_BASE)
 
         if selected_data_path is None:
-            return
+            return 1
     else:
         # User specified via CLI - use directly
         selected_data_path = args.data_dir
         print(f"\nPoužívám data z: {selected_data_path}")
+        warn_full_dataset(selected_data_path)
 
     # Load test data
     print(f"\nNačítám testovací data...")
@@ -615,6 +569,7 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
     print(f"Nalezeno {len(test_dataset)} testovacích vzorků")
+    seen_count, seen_warning = report_seen_samples(args.model_dir, selected_data_path, test_dataset)
 
     # Evaluate
     criterion = nn.CrossEntropyLoss()
@@ -631,12 +586,14 @@ def main() -> None:
     results = {
         "timestamp": timestamp,
         "model_dir": str(args.model_dir.absolute()),
-        "data_dir": str(args.data_dir.absolute()),
+        "data_dir": str(selected_data_path.absolute()),
         "device": str(device),
         "batch_size": args.batch_size,
         "overall_accuracy": float(accuracy),
         "average_loss": float(avg_loss),
         "total_samples": len(test_dataset),
+        "seen_in_training": seen_count,  # None = běh bez data.json (starší model)
+        "seen_warning": seen_warning,
         "num_classes": num_classes,
         "per_class_metrics": per_class_metrics,
         "confusion_matrix": confusion.tolist(),
@@ -651,7 +608,7 @@ def main() -> None:
     if args.output:
         output_path = args.output
     else:
-        output_path = Path("../shared/tests") / f"test_results_{timestamp}.json"
+        output_path = DEFAULT_TESTS_DIR / f"test_results_{timestamp}.json"
 
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -672,7 +629,9 @@ def main() -> None:
     except Exception as e:
         print(f"\nChyba při spuštění vizualizace: {e}")
         input("\nStiskněte Enter pro ukončení...")
+    # Testování proběhlo a výsledky jsou uložené i tehdy, když selže jen vizualizace.
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -6,21 +6,17 @@ Trénovací část projektu pro vlastní alternativu datasetu MNIST. Skript `tra
 
 ```bash
 
-python -m venv .venv
-
-.venv\Scripts\activate
-
 pip install -r requirements.txt
 
 ```
 
-Nebo spusťte `run.bat`, který virtuální prostředí vytvoří, nainstaluje potřebné balíčky (PyTorch, Torchvision, NumPy, Pillow, tqdm, matplotlib) a ponechá je připravené pro další použití.
+Pohodlnější je spustit `run.bat`: připraví sdílené virtuální prostředí `%TEMP%\DIE-MNIST\venv-torch` mimo projekt (viz hlavní README) a závislosti do něj instaluje, jen když chybí nebo se změnily. Ruční `pip install -r requirements.txt` instaluje do právě aktivního prostředí. Balíčky: PyTorch, NumPy, Pillow, tqdm, matplotlib.
 
 Spuštění `run.bat` bez parametrů nejprve otevře editor hyperparametrů `marshall.py`. Po jeho zavření (a případném uložení změn do `config.json`) se automaticky spustí `train.py` se stejnými argumenty, které byly předány dávce. Po dokončení tréninku se automaticky spustí vizualizace modelu (`dispatch.py`) a okno zůstane otevřené, dokud nepotvrdíte zprávu. Pokud spouštíte dávku z vlastního terminálu, přidejte jako první argument `--no-pause`.
 
 ## Konfigurace
 
-Hyperparametry (počty epoch, velikost batch, tempo učení, dropout…) jsou v souboru `config.json`. Pokud chybí, `train.py` použije vestavěné výchozí hodnoty a soubor automaticky vytvoří. Každý parametr lze přepsat argumentem příkazové řádky (`--epochs`, `--learning_rate`, `--step_size`, `--dropout`, `--seed`, …).
+Hyperparametry (počty epoch, velikost batch, tempo učení, dropout…) jsou v souboru `config.json`. Pokud chybí, `train.py` použije vestavěné výchozí hodnoty (soubor sám nevytváří – zapíše ho až uložení v `marshall.py`). Editor uloží jen hodnoty, které trénink přijme: např. u poměrů val/test musí na trénink zbýt aspoň 20 % dat, jinak ukáže chybu a `config.json` nezmění. Cesty se berou relativně ke složce skriptu, takže `train.py` jde spustit odkudkoli. Každý parametr lze přepsat argumentem příkazové řádky (`--epochs`, `--learning_rate`, `--step_size`, `--dropout`, `--seed`, …).
 
 Spuštěním `run.bat marshall` otevřete pouze editor konfigurace (bez následného tréninku); volbou `run.bat train ...` zase spustíte jen trénink a editor přeskočíte.
 
@@ -56,15 +52,19 @@ run.bat --epochs 25
 
 Pro čistě dávkové spuštění bez editoru použijte `run.bat train --epochs 25`.
 
-Skript nahraje data, vytrénuje model a do složky `../shared/models/run_YYYYMMDD_HHMMSS[_NN]/` uloží:
+Skript nahraje data, vytrénuje model a do složky `../shared/models/run_YYYYMMDD_HHMMSS[_NN]/` uloží níže uvedené soubory. Složku běhu zakládá až po načtení dat, takže chybná `--data_dir` nebo prázdná data běh nezaloží.
 
 - `config.json` – použitou konfiguraci (včetně parametrů z CLI),
 
-- `digit_cnn.pt` – váhy nejlepšího modelu dle validační chyby,
+- `data.json` – cestu k datům a hashe vzorků po splitech (DigitTester podle nich pozná vzorky, které model viděl),
+
+- `digit_cnn.pt` – váhy modelu z epochy s nejnižší validační chybou (bez validačních dat z poslední epochy),
 
 - `training_history.json` – průběh metrik po epochách,
 
-- případně `test_metrics.json`, pokud byla konfigurace spuštěna i na testovací sadě.
+- `test_metrics.json` – loss a přesnost nejlepšího modelu na test splitu (jen pokud nějaká testovací data jsou).
+
+Síť má vždy 10 výstupů (číslice 0–9). Chybí-li v datech některá třída, trénink proběhne s varováním; složka s jiným názvem než 0–9 je chyba.
 
 Parametr `--use_cpu` vynutí běh na CPU; jinak se automaticky použije GPU, pokud je dostupné.
 

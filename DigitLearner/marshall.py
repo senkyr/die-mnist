@@ -1,21 +1,19 @@
 import json
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DEFAULTS = {
-    "epochs": 20,
-    "batch_size": 64,
-    "learning_rate": 0.001,
-    "val_ratio": 0.2,
-    "test_ratio": 0.1,
-    "step_size": 10,
-    "lr_gamma": 0.5,
-    "dropout": 0.2,
-    "seed": 42,
-}
+from die_common.config import HyperParams  # noqa: E402
+from die_common.paths import LEARNER_CONFIG  # noqa: E402
+
+CONFIG_PATH = LEARNER_CONFIG
+
+# Výchozí hodnoty drží jediné místo – HyperParams, které čte i train.py.
+DEFAULTS = HyperParams().as_dict()
 
 PARAMS = [
     {"key": "epochs", "label": "Epochs", "type": "int", "min": 1, "max": 200, "step": 1},
@@ -39,6 +37,18 @@ BUTTON_ACTIVE_BG = "#4a4f53"
 BUTTON_ACTIVE_FG = "#ffffff"
 BUTTON_BORDER = "#5a5d60"
 SCALE_TROUGH = "#1a1a1a"
+
+
+def validate_values(data: dict) -> None:
+    """Stejná validace, jakou config.json projde v train.py; ValueError s popisem chyby.
+
+    Posuvníky samy nehlídají vztahy mezi hodnotami (např. val 0,5 + test 0,5
+    nenechá nic na trénink), takže bez kontroly by editor uložil konfiguraci,
+    na které trénink spadne.
+    """
+    hp = HyperParams()
+    hp.update_from_dict(data)
+    hp.validate()
 
 
 def load_config() -> dict:
@@ -213,18 +223,27 @@ class HyperparamEditor(tk.Tk):
                 data[key] = round(raw, 5)
         return data
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """Uloží hodnoty do config.json; neplatné neuloží a ohlásí. Vrací, zda se uložilo."""
+        data = self._collect_values()
         try:
-            data = self._collect_values()
+            validate_values(data)
+        except ValueError as exc:
+            messagebox.showerror("Invalid values", f"{exc}\n\nConfig was not saved.")
+            return False
+        try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with CONFIG_PATH.open("w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2)
         except Exception as exc:  # pragma: no cover
             messagebox.showerror("Save failed", str(exc))
+            return False
+        return True
 
     def _save_and_close(self) -> None:
-        self.save()
-        self.close()
+        # Při neplatných hodnotách okno zůstane otevřené, aby šly opravit.
+        if self.save():
+            self.close()
 
     def reset_defaults(self) -> None:
         for meta in PARAMS:

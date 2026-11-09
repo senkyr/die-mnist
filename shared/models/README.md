@@ -10,6 +10,7 @@ Každý tréninkový běh vytvoří vlastní složku s časovým razítkem:
 models/
 ├── run_20251024_120000/
 │   ├── config.json          # Konfigurace tréninku
+│   ├── data.json            # Na jakých datech se běh učil
 │   ├── digit_cnn.pt         # Váhy modelu (SimpleCNN)
 │   ├── training_history.json  # Historie metrik během tréninku
 │   └── test_metrics.json    # Výsledky testování (pokud bylo spuštěno)
@@ -30,12 +31,11 @@ models/
 
 ### config.json
 
-Obsahuje kompletní konfiguraci použitou při tréninku:
+Hyperparametry použité při tréninku (epochs, batch_size, learning_rate, val/test ratio, step_size, lr_gamma, dropout, seed) a `num_classes`. Cestu k datům nese `data.json`.
 
-- Hyperparametry (epochs, batch_size, learning_rate, dropout...)
-- Cesty k datům
-- Random seed pro reprodukovatelnost
-- Metadata (datum, celkový počet vzorků...)
+### data.json
+
+Na jakých datech se běh učil: `data_dir` (absolutní cesta), `layout` (`split` = složky train/val/test, `random` = náhodné rozdělení ploché složky) a pro každý split počet vzorků a MD5 hashe jejich obsahu. DigitTester podle hashů train a val pozná vyhodnocované vzorky, které model viděl při učení (např. po přeskládání `composed/` až po tréninku), a varuje. `dispatch.py` z `data_dir` bere ukázkovou číslici. Starší běhy soubor nemají.
 
 ### digit_cnn.pt
 

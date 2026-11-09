@@ -2,8 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
-set "VENV_DIR=.venv"
-set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
+rem Druh sdileneho virtualniho prostredi (die_common\requirements-torch.txt)
+set "VENV_KIND=torch"
 
 set "SKIP_PAUSE="
 if /I "%~1"=="--no-pause" (
@@ -24,19 +24,13 @@ goto collect_args
 
 :args_ready
 
-if not exist "%VENV_PY%" (
-    echo Vytvarim virtualni prostredi...
-    python -m venv "%VENV_DIR%"
-    if errorlevel 1 goto fail
-)
+rem Sdileny venv v TEMP a zavislosti (pip jen pri zmene requirements), viz die_common\ensure_venv.bat;
+rem ten nastavi VENV_DIR a VENV_PY
+rem Relativne: cwd je slozka nastroje (cd /d nahore); %~dp0 by po shift ukazovalo na argument
+call "..\die_common\ensure_venv.bat"
+if errorlevel 1 goto fail
 
 call "%VENV_DIR%\Scripts\activate.bat"
-if errorlevel 1 goto fail
-
-echo Kontroluji zavislosti...
-"%VENV_PY%" -m pip install --upgrade pip
-if errorlevel 1 goto fail
-"%VENV_PY%" -m pip install --disable-pip-version-check -r requirements.txt
 if errorlevel 1 goto fail
 
 echo(
@@ -62,7 +56,6 @@ goto status_done
 echo(
 echo Testovani bylo dokonceno.
 rem Pri uspesnem dokonceni automaticky uzavrit okno (vizualizace uz byla zobrazena)
-if defined SKIP_PAUSE goto end
 goto end
 
 :status_done

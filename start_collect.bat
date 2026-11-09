@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 echo.
 echo ========================================================================
-echo  DIE-MNIST - Kompletnı workflow s rucne kreslenymi daty
+echo  DIE-MNIST - Kompletni workflow s rucne kreslenymi daty
 echo ========================================================================
 echo.
 echo Tento skript provede celou pipeline:
@@ -45,10 +45,11 @@ echo [2/4] Spoustim DigitComposer pro sluceni datasetu...
 echo.
 echo NAPOVEDA PRO COMPOSER:
 echo   1. Pridat adresar: Vyberte "shared\data\collected"
-echo   2. Komponovat a ulozit: Vyberte "shared\data\composed"
-echo   3. Pokud slozka composed existuje, potvrdte prepis
+echo   2. Komponovat a ulozit: potvrdte predvybranou slozku "shared\data\composed"
+echo   3. Pokud composed uz obsahuje dataset, potvrdte prepis
+echo   Bez ulozeni do composed se workflow zastavi (Learner by nemel data).
 echo.
-call DigitComposer\run.bat --no-pause
+call DigitComposer\run.bat --no-pause --pipeline
 if errorlevel 1 (
     echo.
     echo CHYBA: DigitComposer selhal.
@@ -92,7 +93,7 @@ echo [4/4] Spoustim DigitTester pro testovani a vizualizaci...
 echo.
 echo NAPOVEDA PRO TESTER:
 echo   1. Vyber modelu: Stisknete Enter pro vyber nejnovejsiho modelu
-echo   2. Vyber dat: Stisknete Enter pro testovani na kompletnim datasetu
+echo   2. Vyber dat: Stisknete Enter pro testovani na test splitu (data, ktera model nevidel)
 echo   3. Po testovani se automaticky otevre vizualizace
 echo.
 call DigitTester\run.bat

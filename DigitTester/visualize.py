@@ -140,6 +140,18 @@ class ResultsVisualizer:
         )
         info_label.pack(anchor="w", pady=(5, 0))
 
+        if self.results.get("seen_warning"):
+            seen = self.results.get("seen_in_training")
+            warn_label = tk.Label(
+                header_frame,
+                text=f"⚠ {seen} z {self.results['total_samples']} vzorků model viděl při učení – "
+                     "přesnost je nadsazená (data se od tréninku přeskládala?)",
+                font=("Arial", 11, "bold"),
+                bg=BG_COLOR,
+                fg="#F44336",
+            )
+            warn_label.pack(anchor="w", pady=(5, 0))
+
     def _create_overall_panel(self):
         """Vytvoří panel s celkovými metrikami."""
         panel = tk.Frame(self.window, bg=BUTTON_BG, relief="flat", bd=0)
@@ -592,8 +604,9 @@ def main():
     args = parser.parse_args()
 
     if args.results is None:
-        # Find latest results file
-        results_files = sorted(Path(".").glob("test_results_*.json"), reverse=True)
+        # Find latest results file (main.py je ukládá do ../shared/tests, ne do cwd)
+        tests_dir = Path(__file__).resolve().parent.parent / "shared" / "tests"
+        results_files = sorted(tests_dir.glob("test_results_*.json"), reverse=True)
         if not results_files:
             print("Chyba: Nenalezen žádný soubor s výsledky.")
             print("Spusťte: python visualize.py --results <cesta_k_JSON>")

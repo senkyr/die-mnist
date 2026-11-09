@@ -5,12 +5,10 @@ Real-time interaktivní aplikace pro vizualizaci klasifikační přesnosti natr�
 ## Instalace
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Nejrychlejší je spustit `run.bat`, který všechno připraví automaticky.
+Pohodlnější je spustit `run.bat`: připraví sdílené virtuální prostředí `%TEMP%\DIE-MNIST\venv-torch` mimo projekt (viz hlavní README) a závislosti do něj instaluje, jen když chybí nebo se změnily. Ruční `pip install -r requirements.txt` instaluje do právě aktivního prostředí.
 
 ## Spuštění
 
@@ -43,12 +41,12 @@ models/run_20251017_221105/
 └── test_metrics.json
 ```
 
-Po úspěšném načtení se nad statistikami zobrazí název modelu (pokud je dostupný, i s počtem vzorků v závorce).
+Po úspěšném načtení se nad statistikami zobrazí název modelu a v závorce počet vzorků z `test_metrics.json` (ten DigitLearner zapisuje jen u běhu s testovacími daty).
 
 ### 2. Kreslení a klasifikace
 
 - **Kreslete myší** v černém canvasu (256×256 px)
-- **Real-time inference** probíhá automaticky každých 50ms (~20 FPS)
+- **Real-time inference** se kontroluje každých 50 ms a přepočítá se jen po změně kresby
 - **Pravděpodobnosti** se aktualizují průběžně během kreslení
 - **Nejvyšší pravděpodobnost** je zvýrazněna světle modrou barvou
 
@@ -60,7 +58,8 @@ Klikněte na tlačítko **Smazat** pro vymazání kreslení a reset pravděpodob
 
 ### Real-time inference
 
-- **Frekvence:** 20 FPS (50ms interval)
+- **Frekvence:** kontrola každých 50 ms, výpočet jen po změně kresby nebo modelu
+- **Tah:** 15 px s kulatými spoji, stejně jako v DigitCollector (jiná tloušťka = jiná data, než na jakých se model učil)
 - **Preprocessing:** Canvas (256×256) → resize na 32×32 → normalizace [0,1] → tensor [1,1,32,32]
 - **Model:** SimpleCNN načtený z vybrané složky
 - **Output:** Softmax pravděpodobnosti pro 10 tříd (0-9)

@@ -1,17 +1,18 @@
 """
 Jednoduchý trénovací skript pro neuronovou síť nad vlastní verzí datasetu číslic.
 
-Spuštění:
-    python train.py --data_dir ../DigitCollector/digits --epochs 20
+Spuštění (z libovolné složky):
+    python train.py                                   # data z ../shared/data/composed
+    python train.py --data_dir ../shared/data/synthetic --epochs 20
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import random
-from dataclasses import asdict, dataclass, fields
+import sys
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -25,9 +26,32 @@ from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm.auto import tqdm
 
-DEFAULT_CONFIG_PATH = Path("config.json")
-DEFAULT_MODELS_DIR = Path("..") / "shared" / "models"
-DEFAULT_DATA_DIR = Path("..") / "shared" / "data" / "composed"
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from die_common.config import (  # noqa: E402
+    HyperParams,
+    load_hyperparams,
+    overrides_from_args,
+    parse_train_args,
+    split_lengths,
+)
+from die_common.data import (  # noqa: E402
+    NUM_CLASSES,
+    check_data_dir,
+    collect_samples,
+    is_split_layout,
+    non_empty_splits,
+    write_data_info,
+)
+from die_common.model import SimpleCNN  # noqa: E402
+from die_common.paths import COMPOSED_DIR, LEARNER_CONFIG, MODELS_DIR  # noqa: E402
+
+# Zpětná kompatibilita pro skripty, které importovaly tyto názvy z train.py.
+DEFAULT_CONFIG_PATH = LEARNER_CONFIG
+DEFAULT_MODELS_DIR = MODELS_DIR
+DEFAULT_DATA_DIR = COMPOSED_DIR
+__all__ = ["HyperParams", "SimpleCNN", "NUM_CLASSES", "DigitDataset"]
 
 @dataclass
 class EpochStats:
@@ -39,53 +63,6 @@ class EpochStats:
     val_loss: float
     val_acc: float
 
-@dataclass
-class HyperParams:
-    """Konfigurace tréninku načítaná z konfigu nebo CLI."""
-
-    epochs: int = 20
-    batch_size: int = 64
-    learning_rate: float = 1e-3
-    val_ratio: float = 0.2
-    test_ratio: float = 0.1
-    step_size: int = 10
-    lr_gamma: float = 0.5
-    dropout: float = 0.2
-    seed: int = 42
-
-    def update_from_dict(self, data: Dict[str, object]) -> None:
-        for field in fields(self):
-            if field.name in data:
-                setattr(self, field.name, data[field.name])
-
-    def apply_overrides(self, overrides: Dict[str, object]) -> None:
-        for key, value in overrides.items():
-            if value is not None and hasattr(self, key):
-                setattr(self, key, value)
-
-    def as_dict(self) -> Dict[str, object]:
-        return {field.name: getattr(self, field.name) for field in fields(self)}
-
-    def validate(self) -> None:
-        if not 0.0 <= self.val_ratio <= 0.5:
-            raise ValueError("val_ratio ocekavam v intervalu <0.0, 0.5>.")
-        if not 0.0 <= self.test_ratio <= 0.5:
-            raise ValueError("test_ratio ocekavam v intervalu <0.0, 0.5>.")
-        if self.val_ratio + self.test_ratio >= 0.8:
-            raise ValueError("Na trenink musi zustat alespon 20 % dat (upravte pomery val/test).")
-        if not 0.0 <= self.dropout <= 1.0:
-            raise ValueError("dropout ocekavam v intervalu <0.0, 1.0>.")
-        if self.step_size <= 0:
-            raise ValueError("step_size musi byt kladne cislo.")
-        if self.lr_gamma <= 0.0 or self.lr_gamma > 1.0:
-            raise ValueError("lr_gamma ocekavam v rozsahu (0.0, 1.0].")
-        if self.epochs <= 0:
-            raise ValueError("epochs musi byt kladne cislo.")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size musi byt kladne cislo.")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate musi byt kladne cislo.")
-
 class DigitDataset(Dataset):
     """Dataset, který čte BMP soubory ze struktury složek 0-9."""
 
@@ -96,22 +73,7 @@ class DigitDataset(Dataset):
         self._load_samples()
 
     def _load_samples(self) -> None:
-        if not self.root_dir.exists():
-            raise FileNotFoundError(f"Složka s daty '{self.root_dir}' neexistuje.")
-
-        for label_dir in sorted(self.root_dir.iterdir()):
-            if not label_dir.is_dir():
-                continue
-            try:
-                label = int(label_dir.name)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Očekávám složky pojmenované čísly 0-9, našel jsem '{label_dir.name}'."
-                ) from exc
-
-            for image_path in sorted(label_dir.glob("*.bmp")):
-                self.samples.append((image_path, label))
-
+        self.samples = collect_samples(self.root_dir, strict=True)
         if not self.samples:
             raise RuntimeError("Nenašel jsem žádné BMP soubory. Zkontrolujte cestu k datasetu.")
 
@@ -134,39 +96,6 @@ class DigitDataset(Dataset):
 
         return tensor, torch.tensor(label, dtype=torch.long)
 
-class SimpleCNN(nn.Module):
-    """Malá konvoluční síť vhodná pro 32x32 číslice."""
-
-    def __init__(self, num_classes: int = 10, dropout: float = 0.2) -> None:
-        super().__init__()
-        self.dropout = dropout
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 16x16
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 8x8
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 4x4
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128 * 4 * 4, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout),
-            nn.Linear(128, num_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
-
 def set_seed(seed: int) -> None:
     """Nastaví seed pro reprodukovatelnost."""
     random.seed(seed)
@@ -184,16 +113,7 @@ def create_loaders(
     seed: int,
 ) -> Dict[str, DataLoader]:
     """Rozdělí dataset na train/val/test a připraví DataLoadery."""
-    total_len = len(dataset)
-    if total_len < 3:
-        raise ValueError("Dataset je příliš malý na rozdělení.")
-
-    val_len = int(total_len * val_ratio)
-    test_len = int(total_len * test_ratio)
-    train_len = total_len - val_len - test_len
-
-    if train_len <= 0:
-        raise ValueError("Zkontrolujte poměry pro validaci/test – na trénink nezbyla data.")
+    train_len, val_len, test_len = split_lengths(len(dataset), val_ratio, test_ratio)
 
     generator = torch.Generator().manual_seed(seed)
     parts = random_split(dataset, [train_len, val_len, test_len], generator=generator)
@@ -214,21 +134,32 @@ def create_loaders_from_subdirectories(
 ) -> Dict[str, DataLoader]:
     """Vytvoří DataLoadery přímo ze složek train/val/test."""
     loaders: Dict[str, DataLoader] = {}
-    for split in ("train", "val", "test"):
-        split_dir = base_dir / split
-        if split_dir.exists() and split_dir.is_dir():
-            subset = DigitDataset(split_dir)
-            if len(subset) == 0:
-                continue
-            loaders[split] = DataLoader(
-                subset,
-                batch_size=batch_size,
-                shuffle=(split == "train"),
-                num_workers=0,
-            )
+    # Prázdný split (např. Composer s val 0 %) přeskočím – DigitDataset by na něm spadl.
+    for split in non_empty_splits(base_dir):
+        loaders[split] = DataLoader(
+            DigitDataset(base_dir / split),
+            batch_size=batch_size,
+            shuffle=(split == "train"),
+            num_workers=0,
+        )
     if "train" not in loaders:
         raise ValueError(f"Očekávám složku '{base_dir / 'train'}' s daty.")
     return loaders
+
+def samples_by_split(loaders: Dict[str, DataLoader]) -> Dict[str, List[Tuple[Path, int]]]:
+    """(cesta, třída) vzorků každého splitu.
+
+    random_split vrací Subset bez atributu .samples – vzorky beru z podkladového
+    datasetu podle indexů.
+    """
+    result: Dict[str, List[Tuple[Path, int]]] = {}
+    for split, loader in loaders.items():
+        subset = loader.dataset
+        source = getattr(subset, "dataset", subset)
+        indices = getattr(subset, "indices", range(len(source.samples)))
+        result[split] = [source.samples[i] for i in indices]
+    return result
+
 
 def train_one_epoch(
     model: nn.Module,
@@ -320,6 +251,15 @@ def evaluate(
     accuracy = correct / total if total else 0.0
     return average_loss, accuracy
 
+def snapshot_state(model: nn.Module) -> Dict[str, torch.Tensor]:
+    """Nezávislá kopie vah na CPU.
+
+    Samotné `.cpu()` na CPU vrací tentýž tensor, takže by se „nejlepší“ stav
+    dál přepisoval dalším tréninkem a uložil by se ve skutečnosti poslední.
+    """
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
+
 def save_history(history: List[EpochStats], output_dir: Path) -> None:
     """Uloží historii trénování do JSONu."""
     history_path = output_dir / "training_history.json"
@@ -327,77 +267,45 @@ def save_history(history: List[EpochStats], output_dir: Path) -> None:
     with history_path.open("w", encoding="utf-8") as handle:
         json.dump(serialized, handle, indent=2, ensure_ascii=False)
 
-def load_hyperparams(config_path: Path, args: argparse.Namespace) -> Tuple[HyperParams, Path, bool]:
-    """Nacti hyperparametry z konfigu a aplikuj CLI overrides."""
-    if config_path is None:
-        config_path = DEFAULT_CONFIG_PATH
-
-    hp = HyperParams()
-    loaded = False
-    if config_path.exists():
-        with config_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-            if not isinstance(data, dict):
-                raise ValueError("Konfiguracni JSON musi obsahovat objekt (dict).")
-            hp.update_from_dict(data)
-            loaded = True
-    elif config_path != DEFAULT_CONFIG_PATH:
-        raise FileNotFoundError(f"Konfiguracni soubor {config_path} neexistuje.")
-
-    overrides = {field.name: getattr(args, field.name, None) for field in fields(HyperParams)}
-    hp.apply_overrides(overrides)
-    hp.validate()
-    return hp, config_path, loaded
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Trains the digit classifier on data from DigitCollector."
-    )
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_CONFIG_PATH,
-        help="Path to the JSON hyperparameter file.",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=Path,
-        default=DEFAULT_DATA_DIR,
-        help="Directory with subfolders 0-9 containing BMP images (default `data`).",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=Path,
-        default=DEFAULT_MODELS_DIR,
-        help="Root directory for all runs (default `models`).",
-    )
-    parser.add_argument("--epochs", type=int, default=None, help="Override number of epochs from config.")
-    parser.add_argument("--batch_size", type=int, default=None, help="Override batch size from config.")
-    parser.add_argument("--learning_rate", type=float, default=None, help="Override learning rate from config.")
-    parser.add_argument("--val_ratio", type=float, default=None, help="Override validation split ratio.")
-    parser.add_argument("--test_ratio", type=float, default=None, help="Override test split ratio.")
-    parser.add_argument("--step_size", type=int, default=None, help="Override StepLR step_size.")
-    parser.add_argument("--lr_gamma", type=float, default=None, help="Override StepLR gamma.")
-    parser.add_argument("--dropout", type=float, default=None, help="Override dropout probability.")
-    parser.add_argument("--seed", type=int, default=None, help="Override RNG seed.")
-    parser.add_argument(
-        "--use_cpu",
-        action="store_true",
-        help="Force CPU even if CUDA is available.",
-    )
-    return parser.parse_args()
-
-
-
 def main() -> None:
-    args = parse_args()
-    hyperparams, config_path, config_loaded = load_hyperparams(args.config, args)
+    args = parse_train_args()
+    hyperparams, config_path, config_loaded = load_hyperparams(args.config, overrides_from_args(args))
 
     set_seed(hyperparams.seed)
 
     device = torch.device("cpu" if args.use_cpu or not torch.cuda.is_available() else "cuda")
     config_state = "loaded" if config_loaded else "defaults used"
     config_status = f"{config_path} ({config_state})"
+
+    # Data kontroluji a načítám dřív, než založím složku běhu: chybná cesta
+    # nebo prázdná data dřív nechávala v shared/models prázdné běhy run_*.
+    data_root = check_data_dir(args.data_dir)
+
+    use_directory_split = is_split_layout(data_root)
+    if use_directory_split:
+        loaders = create_loaders_from_subdirectories(data_root, hyperparams.batch_size)
+        data_layout_desc = "pre-split directories (train/val/test)"
+    else:
+        dataset = DigitDataset(data_root)
+        loaders = create_loaders(
+            dataset,
+            batch_size=hyperparams.batch_size,
+            val_ratio=hyperparams.val_ratio,
+            test_ratio=hyperparams.test_ratio,
+            seed=hyperparams.seed,
+        )
+        data_layout_desc = f"random split (val={hyperparams.val_ratio:.2f}, test={hyperparams.test_ratio:.2f})"
+
+    split_samples = samples_by_split(loaders)
+    label_set = {label for samples in split_samples.values() for _, label in samples}
+    if not label_set:
+        raise ValueError(f"V datové složce '{data_root}' chybí podsložky 0-9 s obrázky.")
+    num_classes = NUM_CLASSES
+    missing = sorted(set(range(NUM_CLASSES)) - label_set)
+    data_summary = {split: len(loader.dataset) for split, loader in loaders.items()}
+    train_loader = loaders.get("train")
+    if train_loader is None:
+        raise ValueError("Nebyla nalezena žádná trénovací data. Zkontrolujte složku s daty.")
 
     base_dir: Path = args.output_dir
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -411,8 +319,18 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=False)
 
     config_output_path = run_dir / "config.json"
+    run_config = hyperparams.as_dict()
+    run_config["num_classes"] = NUM_CLASSES
     with config_output_path.open("w", encoding="utf-8") as handle:
-        json.dump(hyperparams.as_dict(), handle, indent=2)
+        json.dump(run_config, handle, indent=2)
+
+    # Na čem se běh učil – Tester podle toho pozná vzorky, které model viděl.
+    write_data_info(
+        run_dir,
+        data_root,
+        layout="split" if use_directory_split else "random",
+        split_files={split: [path for path, _ in samples] for split, samples in split_samples.items()},
+    )
 
     tqdm.write("")
     tqdm.write("+++ DigitLearner training setup +++")
@@ -431,25 +349,6 @@ def main() -> None:
         ("Seed", hyperparams.seed, "--seed"),
     ]
 
-    data_root = args.data_dir
-    if not data_root.exists():
-        raise FileNotFoundError(f"Data directory '{data_root}' not found. Provide --data_dir or generate a dataset with DigitDreamer.")
-
-    use_directory_split = (data_root / "train").exists() and (data_root / "train").is_dir()
-    if use_directory_split:
-        loaders = create_loaders_from_subdirectories(data_root, hyperparams.batch_size)
-        data_layout_desc = "pre-split directories (train/val/test)"
-    else:
-        dataset = DigitDataset(data_root)
-        loaders = create_loaders(
-            dataset,
-            batch_size=hyperparams.batch_size,
-            val_ratio=hyperparams.val_ratio,
-            test_ratio=hyperparams.test_ratio,
-            seed=hyperparams.seed,
-        )
-        data_layout_desc = f"random split (val={hyperparams.val_ratio:.2f}, test={hyperparams.test_ratio:.2f})"
-
     if use_directory_split:
         setup_rows = [
             (label, "from data split" if label == "Val/Test split" else value,
@@ -457,25 +356,13 @@ def main() -> None:
             for label, value, flag in setup_rows
         ]
 
-    label_set = set()
-    for loader in loaders.values():
-        subset = loader.dataset
-        if hasattr(subset, 'samples'):
-            label_set.update(label for _, label in subset.samples)
-    if not label_set:
-        raise ValueError(f"V datové složce '{data_root}' chybí podsložky 0-9 s obrázky.")
-    if min(label_set) < 0:
-        raise ValueError('Očekávám nezáporné číselné názvy tříd (0-9).')
-    num_classes = max(label_set) + 1
-    data_summary = {split: len(loader.dataset) for split, loader in loaders.items()}
-    train_loader = loaders.get("train")
-    if train_loader is None:
-        raise ValueError("Nebyla nalezena žádná trénovací data. Zkontrolujte složku s daty.")
     setup_rows.append(("Data layout", data_layout_desc, "(auto)"))
     for split_name in ("train", "val", "test"):
         if split_name in data_summary:
             setup_rows.append((f"{split_name.capitalize()} samples", data_summary[split_name], "(auto)"))
-    setup_rows.append(("Classes", num_classes, "(auto)"))
+    setup_rows.append(("Classes", num_classes, "(fixed 0-9)"))
+    if missing:
+        setup_rows.append(("Missing classes", ", ".join(map(str, missing)), "(warning)"))
     for label, value, flag in setup_rows:
         tqdm.write(f"{label:<20} : {str(value):<25} {flag}")
     tqdm.write("")
@@ -485,8 +372,8 @@ def main() -> None:
     tqdm.write("[val]      : batches from the validation split.")
     tqdm.write("")
     tqdm.write("it/s       : iterations (mini-batches) processed per second.")
-    tqdm.write("loss       : instantaneous cross-entropy over the current mini-batch.")
-    tqdm.write("acc        : instantaneous accuracy (fraction correct) over the current mini-batch.")
+    tqdm.write("loss       : running mean cross-entropy over batches processed so far in the epoch.")
+    tqdm.write("acc        : running accuracy (fraction correct) over batches processed so far.")
     tqdm.write("")
     tqdm.write("train_loss : mean cross-entropy over processed training samples.")
     tqdm.write("train_acc  : fraction of correct predictions over processed training samples.")
@@ -545,78 +432,82 @@ def main() -> None:
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_state = {key: value.cpu() for key, value in model.state_dict().items()}
+            best_state = snapshot_state(model)
 
     if best_state is None:
         # Pokud jsme neměli validační data, uložíme poslední stav.
-        best_state = {key: value.cpu() for key, value in model.state_dict().items()}
+        best_state = snapshot_state(model)
 
     model_path = output_dir / "digit_cnn.pt"
     torch.save(best_state, model_path)
     save_history(history, output_dir)
 
-    tqdm.write(f"Natrénovaný model uložen do: {model_path}")
-    tqdm.write(f"Artefakty uložené v: {output_dir}")
-
-    test_results: Optional[Tuple[float, float]] = None
-
-    if "test" in loaders and len(loaders["test"].dataset) > 0:
-        # Načteme uložené váhy do modelu na aktuálním zařízení a spočítáme výsledky na testu.
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        test_loss, test_acc = evaluate(model, loaders["test"], criterion, device, desc="Testing")
-        tqdm.write(f"Test loss: {test_loss:.4f}, test acc: {test_acc:.3f}")
-        test_results = (test_loss, test_acc)
-
-        metrics = {
-            "test_loss": test_loss,
-            "test_accuracy": test_acc,
-            "device": str(device),
-            "epochs": hyperparams.epochs,
-            "batch_size": hyperparams.batch_size,
-            "learning_rate": hyperparams.learning_rate,
-            "val_ratio": hyperparams.val_ratio,
-            "test_ratio": hyperparams.test_ratio,
-            "step_size": hyperparams.step_size,
-            "lr_gamma": hyperparams.lr_gamma,
-            "dropout": hyperparams.dropout,
-            "seed": hyperparams.seed,
-            "num_classes": num_classes,
-        }
-        metrics_path = output_dir / "test_metrics.json"
-        with metrics_path.open("w", encoding="utf-8") as handle:
-            json.dump(metrics, handle, indent=2, ensure_ascii=False)
-        tqdm.write(f"Souhrnné metriky z testu uloženy do: {metrics_path}")
-
-    valid_val_history = [stats for stats in history if not math.isnan(stats.val_loss)]
-    if valid_val_history:
-        best_epoch_stats = min(valid_val_history, key=lambda stats: stats.val_loss)
-    else:
-        best_epoch_stats = max(history, key=lambda stats: stats.train_acc)
-
-    final_stats = history[-1]
-
-    summary_lines = [
-        "",
-        "===== Training summary =====",
-        f"Output directory : {output_dir}",
-        f"Epochs total     : {hyperparams.epochs}",
-        f"Best epoch       : {best_epoch_stats.epoch:02d} "
-        f"(train_loss {best_epoch_stats.train_loss:.4f}, train_acc {best_epoch_stats.train_acc:.3f}, "
-        f"val_loss {best_epoch_stats.val_loss:.4f}, val_acc {best_epoch_stats.val_acc:.3f})",
-        f"Final epoch      : {final_stats.epoch:02d} "
-        f"(train_loss {final_stats.train_loss:.4f}, train_acc {final_stats.train_acc:.3f}, "
-        f"val_loss {final_stats.val_loss:.4f}, val_acc {final_stats.val_acc:.3f})",
-        f"Model path       : {model_path}",
-    ]
-
-    if test_results is not None:
-        t_loss, t_acc = test_results
-        summary_lines.append(f"Test results     : loss {t_loss:.4f}, acc {t_acc:.3f}")
-
-    summary_lines.append("=============================")
-
-    for line in summary_lines:
-        tqdm.write(line)
+    tqdm.write(f"Natrénovaný model uložen do: {model_path}")
+    tqdm.write(f"Artefakty uložené v: {output_dir}")
+
+    test_results: Optional[Tuple[float, float]] = None
+
+    if "test" in loaders and len(loaders["test"].dataset) > 0:
+        # Načteme uložené váhy do modelu na aktuálním zařízení a spočítáme výsledky na testu.
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        test_loss, test_acc = evaluate(model, loaders["test"], criterion, device, desc="Testing")
+        tqdm.write(f"Test loss: {test_loss:.4f}, test acc: {test_acc:.3f}")
+        test_results = (test_loss, test_acc)
+
+        metrics = {
+            "test_loss": test_loss,
+            "test_accuracy": test_acc,
+            "device": str(device),
+            "epochs": hyperparams.epochs,
+            "batch_size": hyperparams.batch_size,
+            "learning_rate": hyperparams.learning_rate,
+            # Při rozdělení podle složek train/val/test se poměry z konfigurace nepoužily.
+            "data_layout": "split" if use_directory_split else "random",
+            "val_ratio": None if use_directory_split else hyperparams.val_ratio,
+            "test_ratio": None if use_directory_split else hyperparams.test_ratio,
+            "step_size": hyperparams.step_size,
+            "lr_gamma": hyperparams.lr_gamma,
+            "dropout": hyperparams.dropout,
+            "seed": hyperparams.seed,
+            "num_classes": num_classes,
+            "num_samples": sum(data_summary.values()),
+            "split_samples": data_summary,
+        }
+        metrics_path = output_dir / "test_metrics.json"
+        with metrics_path.open("w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, indent=2, ensure_ascii=False)
+        tqdm.write(f"Souhrnné metriky z testu uloženy do: {metrics_path}")
+
+    valid_val_history = [stats for stats in history if not math.isnan(stats.val_loss)]
+    if valid_val_history:
+        best_epoch_stats = min(valid_val_history, key=lambda stats: stats.val_loss)
+    else:
+        best_epoch_stats = max(history, key=lambda stats: stats.train_acc)
+
+    final_stats = history[-1]
+
+    summary_lines = [
+        "",
+        "===== Training summary =====",
+        f"Output directory : {output_dir}",
+        f"Epochs total     : {hyperparams.epochs}",
+        f"Best epoch       : {best_epoch_stats.epoch:02d} "
+        f"(train_loss {best_epoch_stats.train_loss:.4f}, train_acc {best_epoch_stats.train_acc:.3f}, "
+        f"val_loss {best_epoch_stats.val_loss:.4f}, val_acc {best_epoch_stats.val_acc:.3f})",
+        f"Final epoch      : {final_stats.epoch:02d} "
+        f"(train_loss {final_stats.train_loss:.4f}, train_acc {final_stats.train_acc:.3f}, "
+        f"val_loss {final_stats.val_loss:.4f}, val_acc {final_stats.val_acc:.3f})",
+        f"Model path       : {model_path}",
+    ]
+
+    if test_results is not None:
+        t_loss, t_acc = test_results
+        summary_lines.append(f"Test results     : loss {t_loss:.4f}, acc {t_acc:.3f}")
+
+    summary_lines.append("=============================")
+
+    for line in summary_lines:
+        tqdm.write(line)
 
 if __name__ == "__main__":
     main()

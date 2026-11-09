@@ -25,8 +25,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-# Import SimpleCNN z train.py
-from train import SimpleCNN
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from die_common.data import NUM_CLASSES, read_data_info  # noqa: E402
+from die_common.model import load_model  # noqa: E402
+from die_common.paths import COMPOSED_DIR, MODELS_DIR, latest_model_run  # noqa: E402
 
 # ============================================================================
 # ARGUMENTY
@@ -40,27 +44,27 @@ def parse_args():
         default=None,
         help="Cesta ke složce s modelem (default: auto-detekce nejnovějšího)"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=MODELS_DIR,
+        help="Kořen běhů jako u train.py, v něm se hledá nejnovější (default shared/models)",
+    )
+    # run.bat předává dispatch.py tytéž argumenty jako train.py, aby se shodla
+    # --output_dir; ostatní (--epochs, --data_dir …) se tu ignorují.
+    args, _ = parser.parse_known_args()
+    return args
 
 # ============================================================================
 # AUTO-DETEKCE NEJNOVĚJŠÍHO MODELU
 # ============================================================================
 
-def find_latest_model():
-    """Najde nejnovější model v ../shared/models/"""
-    models_dir = Path("../shared/models")
-
-    if not models_dir.exists():
-        print(f"❌ Složka s modely neexistuje: {models_dir}")
-        return None
-
-    model_dirs = sorted(models_dir.glob("run_*"))
-
-    if not model_dirs:
+def find_latest_model(models_dir):
+    """Najde nejnovější model v models_dir (výchozí ../shared/models/)."""
+    latest = latest_model_run(Path(models_dir))
+    if latest is None:
         print(f"❌ Žádné modely v {models_dir}")
-        return None
-
-    return model_dirs[-1]
+    return latest
 
 # ============================================================================
 # POMOCNÁ FUNKCE - CENTROVÁNÍ A Z-ORDER OKEN
@@ -118,7 +122,7 @@ print("=" * 60)
 # Auto-detekce nebo explicitní cesta
 if args.model_dir is None:
     print("\nHledám nejnovější model...")
-    args.model_dir = find_latest_model()
+    args.model_dir = find_latest_model(args.output_dir)
     if args.model_dir is None:
         print("\n❌ Žádný model k vizualizaci!")
         print("Nejdřív spusťte trénink: python train.py")
@@ -151,6 +155,7 @@ with open(config_path, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
 dropout = config.get("dropout", 0.2)
+num_classes = config.get("num_classes", NUM_CLASSES)
 print(f"✓ Dropout: {dropout}")
 
 # ============================================================================
@@ -160,10 +165,7 @@ print(f"✓ Dropout: {dropout}")
 print(f"\nNačítám model...")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = SimpleCNN(dropout=dropout)
-model.load_state_dict(torch.load(model_path, map_location=device))
-model.to(device)
-model.eval()
+model = load_model(model_path, num_classes=num_classes, dropout=dropout, device=device)
 
 print(f"✓ Model načten (zařízení: {device})")
 
@@ -188,7 +190,7 @@ print("  Conv2d(1→32, 3×3) + BN + ReLU + MaxPool → 16×16")
 print("  Conv2d(32→64, 3×3) + BN + ReLU + MaxPool → 8×8")
 print("  Conv2d(64→128, 3×3) + BN + ReLU + MaxPool → 4×4")
 print("  Flatten + Linear(2048→128) + ReLU + Dropout")
-print("  Linear(128→10)")
+print(f"  Linear(128→{num_classes})")
 
 # ============================================================================
 # VIZUALIZACE CONV FILTRŮ
@@ -253,16 +255,18 @@ plt.tight_layout()
 
 print("\nVytvářím feature maps pro ukázkovou číslici...")
 
-# Načteme ukázkovou číslici z composed datasetu
-data_dir = Path("../shared/data/composed")
-test_dir = data_dir / "test"
+# Ukázkovou číslici beru z dat, na kterých se běh učil (data.json), u starších běhů z composed/.
+data_info = read_data_info(args.model_dir)
+data_dir = Path(data_info["data_dir"]) if data_info and data_info.get("data_dir") else COMPOSED_DIR
 
-# Pokud test split neexistuje, zkusíme train
-if not test_dir.exists():
-    test_dir = data_dir / "train"
-    if not test_dir.exists():
-        print("⚠️  Varování: Žádná testovací data k dispozici, přeskakuji feature maps")
-        test_dir = None
+# Přednostně test split, pak train, pak plochá složka 0-9
+test_dir = next(
+    (d for d in (data_dir / "test", data_dir / "train", data_dir)
+     if d.is_dir() and next(d.glob("[0-9]/*.bmp"), None) is not None),
+    None,
+)
+if test_dir is None:
+    print(f"⚠️  Varování: V {data_dir} nejsou žádná data, přeskakuji feature maps")
 
 if test_dir is not None:
     # Najdeme nějakou číslici

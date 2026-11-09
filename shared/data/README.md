@@ -14,7 +14,7 @@ Synteticky generovaná data vytvořená pomocí **DigitDreamer**. Lze vytvořit 
 
 ### composed/
 
-Finální sloučený dataset vytvořený pomocí **DigitComposer**. Obsahuje:
+Finální sloučený dataset vytvořený pomocí **DigitComposer** (výchozí výstup; složku Composer založí sám, v repu není). Obsahuje:
 
 - `train/` - trénovací data
 - `val/` - validační data

@@ -1,13 +1,20 @@
-﻿import tkinter as tk
-from PIL import Image, ImageDraw, ImageTk
+import tkinter as tk
+from PIL import Image, ImageDraw, ImageOps, ImageTk
 import numpy as np
 import random
 import os
 import glob
+import sys
+from pathlib import Path
+
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from die_common.paths import COLLECTED_DIR  # noqa: E402
 
 CANVAS_SIZE = 256
 IMAGE_SIZE = 32
-DIGITS_DIR = os.path.join("..", "shared", "data", "collected")
+DIGITS_DIR = str(COLLECTED_DIR)  # nezávisle na složce, odkud se aplikace spustí
 
 # Dark UI palette matching the reference screen.png.
 BG_COLOR = "#2b2b2b"
@@ -52,6 +59,7 @@ class DigitCollectorApp:
         self.label.pack(pady=(10, 4))
 
         self.noise_var = tk.BooleanVar(value=False)
+        self.invert_var = tk.BooleanVar(value=False)
         self.canvas = tk.Canvas(
             master,
             width=CANVAS_SIZE,
@@ -63,10 +71,10 @@ class DigitCollectorApp:
             relief="flat",
         )
         self.canvas.pack()
-        self.noise_check = tk.Checkbutton(
-            master,
-            text="Přidávat šum",
-            variable=self.noise_var,
+        # Volby uložení vedle sebe: šum a negace (světlé pozadí, tmavý tah – jako
+        # invertované vzorky DigitDreameru, --invert_prob).
+        self.options_frame = tk.Frame(master, bg=BG_COLOR)
+        checkbox_style = dict(
             bg=BG_COLOR,
             fg=FG_COLOR,
             selectcolor=BG_COLOR,
@@ -75,7 +83,15 @@ class DigitCollectorApp:
             highlightthickness=0,
             font=("Arial", 12),
         )
-        self.noise_check.pack(pady=(8, 8))
+        self.noise_check = tk.Checkbutton(
+            self.options_frame, text="Přidávat šum", variable=self.noise_var, **checkbox_style
+        )
+        self.noise_check.pack(side=tk.LEFT, padx=(0, 12))
+        self.invert_check = tk.Checkbutton(
+            self.options_frame, text="Negovat barvy", variable=self.invert_var, **checkbox_style
+        )
+        self.invert_check.pack(side=tk.LEFT)
+        self.options_frame.pack(pady=(8, 8))
         self.image = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)  # Black background for drawing
         self.draw = ImageDraw.Draw(self.image)
 
@@ -181,7 +197,7 @@ class DigitCollectorApp:
         self.last_x, self.last_y = event.x, event.y
 
     def draw_on_canvas(self, event):
-        if self.last_x and self.last_y:
+        if self.last_x is not None and self.last_y is not None:  # 0 je platná souřadnice
             self.canvas.create_line(self.last_x, self.last_y, event.x, event.y,
                                     width=15, fill="white", capstyle=tk.ROUND, smooth=tk.TRUE)
             self.draw.line([self.last_x, self.last_y, event.x, event.y],
@@ -204,7 +220,7 @@ class DigitCollectorApp:
         noisy = np.clip(array + noise, 0, 255).astype(np.uint8)
         lift = random.uniform(0, 20)
         noisy = np.clip(noisy + lift, 0, 255).astype(np.uint8)
-        return Image.fromarray(noisy, mode="L")
+        return Image.fromarray(noisy)  # uint8 2D -> režim "L"; parametr mode je v Pillow 11.3+ deprecated
 
     def show_noisy_preview(self, image: Image.Image) -> None:
         preview = image.resize((CANVAS_SIZE, CANVAS_SIZE), Image.NEAREST)
@@ -243,8 +259,12 @@ class DigitCollectorApp:
         image_to_save = self.image
         showed_noise = False
         if self.noise_var.get():
-            image_to_save = self.apply_noise(self.image)
-            self.show_noisy_preview(image_to_save)
+            image_to_save = self.apply_noise(image_to_save)
+        if self.invert_var.get():
+            # Až po šumu, stejně jako v DigitDreameru (šum, pak případná inverze).
+            image_to_save = ImageOps.invert(image_to_save)
+        if self.noise_var.get() or self.invert_var.get():
+            self.show_noisy_preview(image_to_save)  # krátce ukáže, co se skutečně uložilo
             showed_noise = True
 
         resized_image = image_to_save.resize((IMAGE_SIZE, IMAGE_SIZE), Image.LANCZOS)
@@ -294,7 +314,7 @@ class DigitCollectorApp:
     def _enter_stats_view(self):
         if not self.is_stats_view:
             self.canvas.pack_forget()
-            self.noise_check.pack_forget()
+            self.options_frame.pack_forget()
             self.button_frame.pack_forget()
             self.stats_canvas.pack(padx=0, pady=0)
             self.is_stats_view = True
@@ -306,7 +326,7 @@ class DigitCollectorApp:
             self.stats_canvas.pack_forget()
             self.is_stats_view = False
         self.canvas.pack()
-        self.noise_check.pack(pady=(8, 8))
+        self.options_frame.pack(pady=(8, 8))
         self.button_frame.pack_forget()
         self.button_frame.pack(pady=10)
         self.label.config(text=self.draw_prompt_template.format(self.target_digit))

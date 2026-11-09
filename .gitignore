@@ -40,3 +40,8 @@ shared/tests/*.json
 # (OLD)MNIST reference - ignore downloaded data and trained models
 (OLD)MNIST/data/
 (OLD)MNIST/model/
+
+# Secrets and model binaries anywhere
+.env
+*.pt
+*.pth

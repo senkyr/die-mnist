@@ -1,6 +1,2 @@
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24
-Pillow>=11.0.0
-tqdm>=4.65.0
-matplotlib>=3.7.0
+# Závislosti jsou společné pro nástroje téhož druhu (run.bat je instaluje do sdíleného venv).
+-r ../die_common/requirements-torch.txt

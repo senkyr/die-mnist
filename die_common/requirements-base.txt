@@ -1,0 +1,3 @@
+# DigitCollector, DigitComposer, DigitDreamer
+numpy>=1.24
+Pillow>=11.0.0

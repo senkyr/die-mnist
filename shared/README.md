@@ -19,7 +19,7 @@ shared/
 Tato složka odděluje sdílená data a modely od jednotlivých nástrojů. To umožňuje:
 
 - ✅ Snadné zálohování - celá složka `shared/` obsahuje vše důležité
-- ✅ Čistou strukturu - nástroje mají vlastní `.venv` a kód, data jsou mimo
+- ✅ Čistou strukturu - nástroje mají vlastní kód, data jsou mimo (a virtuální prostředí mimo projekt)
 - ✅ Jednoduchý cleanup - smazání `shared/` vyresetuje všechna data
 - ✅ Přehlednost - jasně oddělené "co" od "jak"
 

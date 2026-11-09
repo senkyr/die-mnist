@@ -1,4 +1,4 @@
-﻿"""
+"""
 Synthetic dataset generator that creates digit-like shapes using simple geometry.
 Produces 32x32 grayscale BMP images that can be fed into DigitLearner.
 """
@@ -13,8 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Tuple
 
+import sys
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
+
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from die_common.data import allocate_counts  # noqa: E402
+from die_common.paths import SYNTHETIC_DIR  # noqa: E402
 
 SIZE = 32  # Output image size.
 
@@ -185,7 +193,7 @@ def add_noise(image: Image.Image, noise_sigma: float) -> Image.Image:
     noisy = np.clip(array + noise, 0, 255).astype(np.uint8)
     background_lift = random.uniform(0, 18)
     noisy = np.clip(noisy + background_lift, 0, 255).astype(np.uint8)
-    return Image.fromarray(noisy, mode="L")
+    return Image.fromarray(noisy)  # uint8 2D -> režim "L"; parametr mode je v Pillow 11.3+ deprecated
 
 
 def draw_shape(shape: ShapeSpec, noise_sigma: float) -> Image.Image:
@@ -227,6 +235,55 @@ def next_index_for(target_dir: Path) -> int:
     return max_index + 1
 
 
+OWN_PATTERNS = ("[0-9]*/*.bmp", "train/[0-9]*/*.bmp", "val/[0-9]*/*.bmp", "test/[0-9]*/*.bmp")
+
+
+def own_images(base_dir: Path) -> list[Path]:
+    """BMP ve struktuře, kterou Dreamer sám vytváří (<třída>/ nebo <split>/<třída>/)."""
+    if not base_dir.exists():
+        return []
+    return [
+        item
+        for pattern in OWN_PATTERNS
+        for item in base_dir.glob(pattern)
+        if item.is_file() and item.parent.name.isdigit()
+    ]
+
+
+def pixel_digest(image: Image.Image) -> str:
+    return hashlib.md5(image.tobytes()).hexdigest()
+
+
+def existing_digests(base_dir: Path) -> set[str]:
+    """Hashe pixelů už uložených obrázků, aby je doplňování nevyrobilo znovu."""
+    digests = set()
+    for path in own_images(base_dir):
+        try:
+            with Image.open(path) as img:
+                digests.add(pixel_digest(img.convert("L")))
+        except OSError:
+            continue  # nečitelný soubor nijak nevadí, jen se s ním neporovnává
+    return digests
+
+
+def run_seed(seed: int, existing_count: int) -> int:
+    """Seed pro tento běh: bez dat přesně --seed, při doplňování odvozený i z počtu souborů.
+
+    Doplňování se stejným seedem vyrobilo tutéž sekvenci obrázků znovu pod
+    novými čísly a Composer pak kopie rozhodil do train i test. Odvození
+    zůstává reprodukovatelné: stejný seed a stejný stav složky dají stejná data.
+    """
+    if existing_count == 0:
+        return seed
+    digest = hashlib.sha256(f"{seed}:{existing_count}".encode("ascii")).digest()
+    return int.from_bytes(digest[:4], "big")
+
+
+def seed_generators(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+
+
 def generate_dataset(
     base_dir: Path,
     samples_per_class: int,
@@ -238,7 +295,7 @@ def generate_dataset(
     invert_prob: float,
     max_retry: int,
     use_extra_shapes: bool,
-) -> None:
+) -> Tuple[int, Counter[str]]:
     shapes = dict(SHAPES)
     if use_extra_shapes:
         shapes.update(MORE_SHAPES)
@@ -269,7 +326,8 @@ def generate_dataset(
         ensure_dirs(base_dir, labels)
         splits = [(None, 1.0)]
 
-    seen_hashes: set[str] = set()
+    # Při doplňování se porovnává i s tím, co už ve složce leží.
+    seen_hashes: set[str] = existing_digests(base_dir)
     created_total = 0
     created_by_tag: Counter[str] = Counter()
 
@@ -288,7 +346,7 @@ def generate_dataset(
         for _ in range(max(1, max_retry)):
             img = draw_shape(spec, noise_sigma)
             img = maybe_augment(img)
-            digest = hashlib.md5(img.tobytes()).hexdigest()
+            digest = pixel_digest(img)
             if digest not in seen_hashes:
                 seen_hashes.add(digest)
                 return img
@@ -300,13 +358,9 @@ def generate_dataset(
     for label in labels:
         spec = shapes[label]
         if split_mode:
-            allocations = {}
-            remaining = samples_per_class
-            for split_name, ratio in splits[:-1]:
-                count = int(round(samples_per_class * ratio))
-                allocations[split_name] = max(0, count)
-                remaining -= count
-            allocations[splits[-1][0]] = max(0, remaining)
+            # Největší zbytek: round() u train i val uměl přestřelit (3 vzorky, val 0,5 → 2+2).
+            counts = allocate_counts(samples_per_class, [ratio for _, ratio in splits])
+            allocations = {name: count for (name, _), count in zip(splits, counts)}
         else:
             allocations = {None: samples_per_class}
 
@@ -343,11 +397,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         type=Path,
-        default=Path("..") / "shared" / "data" / "synthetic",
+        default=SYNTHETIC_DIR,
         help="Directory where class subfolders will be created (default: ../shared/data/synthetic/).",
     )
     parser.add_argument("--samples", type=int, default=600,
-                        help="Base number of images per class (train samples when --split).")
+                        help="Number of images per class (with --split divided into train/val/test).")
     parser.add_argument("--noise", type=float, default=18.0,
                         help="Gaussian noise sigma applied to each image.")
     parser.add_argument("--seed", type=int, default=1234,
@@ -373,9 +427,11 @@ def parse_args() -> argparse.Namespace:
 
 def prepare_output_dir(base_dir: Path, clean: bool) -> None:
     if base_dir.exists() and clean:
-        for item in base_dir.rglob("*"):
-            if item.is_file():
-                item.unlink()
+        # Mažu jen obrázky ve struktuře, kterou Dreamer sám vytváří (<třída>/ nebo
+        # <split>/<třída>/). --output_dir může omylem ukazovat výš (např. na
+        # shared/data) a data jiných nástrojů ani README.md nesmí zmizet.
+        for item in own_images(base_dir):
+            item.unlink()
         for sub in sorted((p for p in base_dir.rglob("*") if p.is_dir()), reverse=True):
             if not any(sub.iterdir()):
                 sub.rmdir()
@@ -426,12 +482,16 @@ def main() -> None:
         print(f"Data ve slozce {output_dir} zustala zachovana. Generovani neprobehlo.")
         return
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-
     clean_flag = action == "replace"
 
     prepare_output_dir(output_dir, clean=clean_flag)
+
+    existing_count = len(own_images(output_dir))
+    seed = run_seed(args.seed, existing_count)
+    if seed != args.seed:
+        print(f"Doplnuji k {existing_count} existujicim obrazkum: seed {seed} "
+              f"(odvozeny z --seed {args.seed} a poctu souboru, aby se obrazky neopakovaly).")
+    seed_generators(seed)
 
     generated_total, generated_breakdown = generate_dataset(
         base_dir=output_dir,

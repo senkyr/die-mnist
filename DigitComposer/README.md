@@ -6,15 +6,11 @@ Desktopová aplikace v Tkinteru pro slučování datasetů ručně kreslených �
 
 ```bash
 
-python -m venv .venv
-
-.venv\Scripts\activate
-
 pip install -r requirements.txt
 
 ```
 
-Pohodlnější je spustit `run.bat`, který virtuální prostředí i závislosti připraví automaticky.
+Pohodlnější je spustit `run.bat`: připraví sdílené virtuální prostředí `%TEMP%\DIE-MNIST\venv-base` mimo projekt (viz hlavní README) a závislosti do něj instaluje, jen když chybí nebo se změnily. Ruční `pip install -r requirements.txt` instaluje do právě aktivního prostředí.
 
 ## Spuštění
 
@@ -26,6 +22,8 @@ run.bat
 
 Otevře se okno s GUI aplikací.
 
+Workflow skripty `start_collect.bat` a `start_dream.bat` volají Composer s přepínačem `--pipeline`. V tomto režimu skončí s kódem 1, pokud do `shared/data/composed/` nic nezapsal (okno zavřené bez komponování nebo uložení jinam), a workflow se zastaví dřív, než by DigitLearner spadl na chybějících datech.
+
 ## Jak použít
 
 ### 1. Přidání zdrojů dat
@@ -35,7 +33,7 @@ Kliknutím na tlačítka **Přidat adresář** nebo **Přidat ZIP** vyberte data
 **Inteligentní výchozí adresáře:**
 
 - Tlačítko **Přidat adresář** automaticky otevře dialog ve složce `../shared/data/` (pokud existuje), kde jsou uložena collected a synthetic data
-- Tlačítko **Komponovat a uložit** automaticky otevře dialog v nadřazené složce projektu pro snadný výběr
+- Tlačítko **Komponovat a uložit** založí `../shared/data/composed/`, pokud chybí, a otevře dialog přímo v ní – stačí potvrdit
 
 **Podporované struktury:**
 
@@ -48,7 +46,7 @@ Kliknutím na tlačítka **Přidat adresář** nebo **Přidat ZIP** vyberte data
   - `archive.zip → digits/0/, digits/1/, ...` (v podsložce digits)
   - `archive.zip → jmeno/digits/0/` nebo `jmeno/0/` (vnořená struktura)
 
-Aplikace automaticky detekuje správnou úroveň s adresáři tříd 0-9.
+Aplikace automaticky detekuje správnou úroveň s adresáři tříd 0-9. Je-li zdroj už rozdělený na `train/`, `val/`, `test/` (např. `DigitDreamer --split`), přidá se každý split jako samostatný zdroj a Composer je znovu promíchá podle svých poměrů.
 
 ### 2. Statistiky
 
@@ -82,15 +80,15 @@ Aplikace automaticky validuje, že součet poměrů je 100% (✓/⚠ indikátor)
 ### 5. Komponování a uložení datasetu
 
 1. Klikněte na **Komponovat a uložit**
-2. Vyberte výstupní adresář (nemůže být přímo složka programu, ale podsložky jsou v pořádku)
-3. Pokud složka obsahuje soubory, aplikace se zeptá na potvrzení jejich smazání
+2. Potvrďte předvybranou složku `shared/data/composed`, ze které čtou DigitLearner i DigitTester. Jiná složka je možná (ne přímo složka programu), závěrečné okno pak připomene, že Learner a Tester ji potřebují dostat přes `--data_dir`
+3. Pokud složka obsahuje dřívější výstup (jen `train/`, `val/`, `test/`, případně `README.md`), aplikace se zeptá na potvrzení a smaže jen tyto splity. Složku s jiným obsahem (např. `shared/data` s `collected/`) odmítne přepsat, stejně jako složku, ve které leží některý ze zdrojů.
 4. Dataset se automaticky zkompiluje s rozdělením na train/val/test sady
 
 **Přečíslování souborů:**
 
 Každý soubor dostane nový název ve formátu `SSOOOO.bmp`:
 
-- `SS` = ID zdroje (01-99), přiřazeno podle pořadí přidání
+- `SS` = ID zdroje (01-99): nový zdroj dostane nejnižší volné ID, odebraný zdroj své ID uvolní
 - `OOOO` = původní 4-ciferné číslo ze zdrojového souboru (0001-9999)
 
 **Příklad:**
@@ -112,7 +110,7 @@ Aplikace používá **Global Split se stratifikací**:
 1. Pro každou třídu (0-9) samostatně:
    - Sesbírá všechny vzorky ze všech zdrojů
    - Promíchá je podle nastaveného seedu
-   - Rozdělí podle poměrů train/val/test
+   - Rozdělí podle poměrů train/val/test; počty se zaokrouhlují metodou největšího zbytku (`die_common.data.allocate_counts`), takže např. 9 vzorků při 70/20/10 dá 6/2/1
 2. Zajišťuje, že každá třída má stejné poměry v každé sadě
 
 Toto schéma zajišťuje:
@@ -132,7 +130,7 @@ Při překročení limitů se zobrazí chybová hláška.
 
 ## Výstup
 
-Uživatelem zvolená složka s rozdělením na train/val/test:
+Uživatelem zvolená složka (výchozí `shared/data/composed/`) s rozdělením na train/val/test:
 
 ```
 output_folder/
@@ -186,9 +184,9 @@ Viz hlavní README pro kompletní workflow a strukturu projektu.
   - Použití `random.seed()` pro reprodukovatelnost
   - Validace poměrů s real-time feedbackem (✓/⚠)
   - Automatický výpočet absolutních počtů vzorků
-- **Ochrana:** Zabránění uložení přímo do složky programu
+- **Ochrana:** Zabránění uložení přímo do složky programu, do složky s cizími daty nebo do složky obsahující zdroj
 - **Validace:**
-  - Kontrola neprázdné složky s potvrzením
+  - Kontrola neprázdné složky: přepíše jen dřívější výstup Composeru, a to po potvrzení
   - Kontrola součtu poměrů (musí být 100%)
   - Detekce BMP formátu
 - **Progress bar:** Zobrazuje průběh po třídách (0-9)

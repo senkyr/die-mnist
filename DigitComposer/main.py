@@ -1,13 +1,22 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
+import argparse
 import os
 import glob
 import shutil
+import sys
 import zipfile
 import tempfile
 import atexit
 import random
+from pathlib import Path
+
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from die_common.data import allocate_counts  # noqa: E402
+from die_common.paths import COMPOSED_DIR, DATA_DIR  # noqa: E402
 
 # Dark UI palette matching DigitCollector
 BG_COLOR = "#2b2b2b"
@@ -26,6 +35,49 @@ LISTBOX_SELECT_FG = "#ffffff"
 MAX_SOURCES = 99
 MAX_SAMPLES_PER_SOURCE = 9999
 NUM_CLASSES = 10
+SPLIT_NAMES = ("train", "val", "test")
+# Co smí ležet ve výstupní složce, aby ji Composer směl vyčistit.
+COMPOSED_ENTRIES = set(SPLIT_NAMES) | {"README.md"}
+
+
+def _is_within(path, parent):
+    """True, pokud `path` leží v `parent` (nebo je to tatáž složka)."""
+    path = os.path.normcase(os.path.abspath(path))
+    parent = os.path.normcase(os.path.abspath(parent))
+    try:
+        return os.path.commonpath([path, parent]) == parent
+    except ValueError:  # jiné disky na Windows
+        return False
+
+
+def _same_dir(a, b):
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def prepare_default_output_dir(composed_dir=None):
+    """Založí výchozí výstup shared/data/composed a vrátí ho jako start dialogu.
+
+    V čerstvém klonu složka neexistuje (verzuje se jen shared/data/README.md),
+    dialog proto začínal v shared/data, kam Composer zapisovat nesmí, a data
+    končila ve složce, kterou Learner ani Tester nečtou.
+    """
+    if composed_dir is None:
+        composed_dir = COMPOSED_DIR
+    os.makedirs(composed_dir, exist_ok=True)
+    return str(composed_dir)
+
+
+def lowest_free_source_id(used_ids, max_id=MAX_SOURCES):
+    """Nejnižší volné ID zdroje 1..max_id – ID je předpona SS v názvu SSOOOO.bmp.
+
+    Počítadlo, které jen rostlo, dávalo po víc než 99 přidáních (i s odebíráním)
+    třímístná ID a sedmimístné názvy souborů. Odebraný zdroj ID uvolní.
+    """
+    used = set(used_ids)
+    for source_id in range(1, max_id + 1):
+        if source_id not in used:
+            return source_id
+    raise ValueError(f"Všech {max_id} ID zdrojů je obsazeno. Odeberte některý zdroj.")
 
 
 class DataSource:
@@ -74,7 +126,8 @@ class DigitComposerApp:
         tk.Frame(master, height=15, bg=BG_COLOR).pack()
 
         self.sources = []
-        self.next_source_id = 1
+        # Zapsal Composer v tomto spuštění dataset do shared/data/composed? (--pipeline)
+        self.composed_written = False
 
         # Split configuration
         self.train_ratio = tk.DoubleVar(value=0.7)
@@ -308,11 +361,7 @@ class DigitComposerApp:
         program_dir = os.path.dirname(os.path.abspath(__file__))
         parent_dir = os.path.dirname(program_dir)
 
-        initial_dir = parent_dir
-        shared_data_path = os.path.join(parent_dir, "shared", "data")
-
-        if os.path.exists(shared_data_path):
-            initial_dir = shared_data_path
+        initial_dir = str(DATA_DIR) if DATA_DIR.is_dir() else parent_dir
 
         dir_path = filedialog.askdirectory(
             title="Vyberte adresář s daty",
@@ -321,22 +370,28 @@ class DigitComposerApp:
         if not dir_path:
             return
 
-        data_path = self._detect_structure(dir_path)
-        if not data_path:
+        data_paths = self._confirm_datasets(dir_path)
+        if data_paths is None:
+            return
+        if not data_paths:
             messagebox.showerror(
                 "Neplatná struktura",
-                "Adresář neobsahuje očekávanou strukturu dat (0/, 1/, ... 9/ nebo digits/0/, ... digits/9/)."
+                "Adresář neobsahuje očekávanou strukturu dat (0/, 1/, ... 9/, digits/0/, ... "
+                "nebo train/val/test s podsložkami 0-9)."
             )
             return
+        if len(self.sources) + len(data_paths) > MAX_SOURCES:
+            messagebox.showerror("Chyba", f"Maximální počet zdrojů je {MAX_SOURCES}.")
+            return
 
-        source = DataSource(
-            source_id=self.next_source_id,
-            source_type='dir',
-            display_name=os.path.basename(dir_path),
-            data_path=data_path,
-        )
-
-        self._add_source(source)
+        for data_path in data_paths:
+            source = DataSource(
+                source_id=self._next_source_id(),
+                source_type='dir',
+                display_name=os.path.basename(dir_path),
+                data_path=data_path,
+            )
+            self._add_source(source)
 
     def add_zip(self):
         """Add a ZIP archive as a data source."""
@@ -367,50 +422,85 @@ class DigitComposerApp:
             messagebox.showerror("Chyba", f"Nelze rozbalit ZIP archiv: {e}")
             return
 
-        data_path = self._detect_structure(temp_dir)
-        if not data_path:
+        data_paths = self._confirm_datasets(temp_dir)
+        if data_paths is None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return
+        if not data_paths or len(self.sources) + len(data_paths) > MAX_SOURCES:
             shutil.rmtree(temp_dir, ignore_errors=True)
             messagebox.showerror(
-                "Neplatná struktura",
-                "ZIP archiv neobsahuje očekávanou strukturu dat."
+                "Neplatná struktura" if not data_paths else "Chyba",
+                "ZIP archiv neobsahuje očekávanou strukturu dat." if not data_paths
+                else f"Maximální počet zdrojů je {MAX_SOURCES}."
             )
             return
 
-        source = DataSource(
-            source_id=self.next_source_id,
-            source_type='zip',
-            display_name=os.path.basename(zip_path),
-            data_path=data_path,
-            temp_dir=temp_dir,
-        )
+        for data_path in data_paths:
+            source = DataSource(
+                source_id=self._next_source_id(),
+                source_type='zip',
+                display_name=os.path.basename(zip_path),
+                data_path=data_path,
+                temp_dir=temp_dir,
+            )
+            self._add_source(source)
 
-        self._add_source(source)
+    def _dataset_roots(self, root_path):
+        """Všechny složky s podsložkami 0-9 do hloubky 3; do nalezené se dál nesestupuje.
 
-    def _detect_structure(self, root_path):
+        Podporuje 0/…9/ přímo v kořeni, digits/0/…, jmeno/digits/0/… i splity
+        train/val/test. Dřív se vracela jen první nalezená složka a další
+        datasety ve vybrané složce (např. synthetic/ vedle collected/ při výběru
+        shared/data, nebo data dalších žáků v jednom ZIPu) se tiše vynechaly.
         """
-        Detect the data structure in the given path.
-
-        Supports:
-        - 0/, 1/, ..., 9/ directly in root
-        - digits/0/, digits/1/, ..., digits/9/
-        - any_dir/digits/0/, ... or any_dir/0/, ...
-
-        Returns the path containing 0-9 directories, or None if not found.
-        """
-        # Check current level
-        if self._has_class_dirs(root_path):
-            return root_path
-
-        # Check subdirectories recursively (max 3 levels deep)
+        found = []
         for root, dirs, files in os.walk(root_path):
+            dirs.sort()
             depth = root[len(root_path):].count(os.sep)
-            if depth > 3:
-                continue
-
             if self._has_class_dirs(root):
-                return root
+                found.append(root)
+                dirs[:] = []
+            elif depth >= 3:
+                dirs[:] = []
+        return found
 
-        return None
+    def _dataset_groups(self, root_path):
+        """{dataset: [složky zdrojů]}; splity train/val/test patří k jednomu datasetu.
+
+        Dataset rozdělený na train/val/test (DigitDreamer --split, starší
+        composed) dává tři zdroje v pořadí train, val, test. Výstup Composeru
+        (shared/data/composed) vnořený ve vybrané složce se přeskočí – jsou to
+        odvozená data a zdroj ve výstupní složce by komponování stejně odmítlo.
+        """
+        groups = {}
+        for path in self._dataset_roots(root_path):
+            name = os.path.basename(path)
+            key = os.path.dirname(path) if name in SPLIT_NAMES else path
+            groups.setdefault(key, []).append(path)
+        for key in list(groups):
+            if _same_dir(key, COMPOSED_DIR) and not _same_dir(key, root_path):
+                del groups[key]
+        for key, paths in groups.items():
+            order = {os.path.join(key, n): i for i, n in enumerate(SPLIT_NAMES)}
+            paths.sort(key=lambda p: order.get(p, -1))
+        return groups
+
+    def _find_data_roots(self, root_path):
+        """Složky zdrojů ze všech datasetů ve vybrané cestě (viz _dataset_groups)."""
+        return [p for paths in self._dataset_groups(root_path).values() for p in paths]
+
+    def _confirm_datasets(self, root_path):
+        """Složky zdrojů k přidání; u více datasetů se zeptá. None = uživatel odmítl, [] = nic nenalezeno."""
+        groups = self._dataset_groups(root_path)
+        if len(groups) > 1:
+            names = "\n".join(f"- {os.path.relpath(k, root_path)}" for k in groups)
+            if not messagebox.askyesno(
+                "Více datasetů",
+                f"Vybraná složka obsahuje {len(groups)} datasety:\n{names}\n\n"
+                "Přidat je všechny jako samostatné zdroje?",
+            ):
+                return None
+        return [p for paths in groups.values() for p in paths]
 
     def _has_class_dirs(self, path):
         """Check if path contains subdirectories named 0-9."""
@@ -426,10 +516,12 @@ class DigitComposerApp:
         # Require at least 5 class directories to be considered valid
         return found_classes >= 5
 
+    def _next_source_id(self):
+        return lowest_free_source_id(s.id for s in self.sources)
+
     def _add_source(self, source):
         """Add a source to the list and update UI."""
         self.sources.append(source)
-        self.next_source_id += 1
 
         # Update listbox with inline statistics
         stats_str = " | ".join(f"{source.stats[i]:02d}" for i in range(NUM_CLASSES))
@@ -449,11 +541,10 @@ class DigitComposerApp:
         idx = selection[0]
         source = self.sources[idx]
 
-        # Cleanup temporary files
-        source.cleanup()
-
-        # Remove from list
+        # Remove from list; temp dir smažu, až ho nepoužívá žádný jiný zdroj ze stejného ZIPu
         del self.sources[idx]
+        if not any(s.temp_dir and s.temp_dir == source.temp_dir for s in self.sources):
+            source.cleanup()
         self.sources_listbox.delete(idx)
 
         # Update split counts
@@ -480,13 +571,21 @@ class DigitComposerApp:
                 fg="#ff6b6b",
             )
 
+    def _ratios(self):
+        return (self.train_ratio.get(), self.val_ratio.get(), self.test_ratio.get())
+
     def _update_split_counts(self):
         """Update the displayed sample counts for each split."""
-        total_samples = sum(source.get_total_samples() for source in self.sources)
-
-        train_count = int(total_samples * self.train_ratio.get())
-        val_count = int(total_samples * self.val_ratio.get())
-        test_count = int(total_samples * self.test_ratio.get())
+        # Stejný výpočet jako při komponování: po třídách, největší zbytek.
+        train_count = val_count = test_count = 0
+        ratios = self._ratios()
+        if sum(ratios) > 0:
+            for class_idx in range(NUM_CLASSES):
+                n = sum(source.stats[class_idx] for source in self.sources)
+                tr, va, te = allocate_counts(n, ratios)
+                train_count += tr
+                val_count += va
+                test_count += te
 
         self.train_count_label.config(text=f"{self.train_ratio.get()*100:.0f}% ({train_count} vzorků)")
         self.val_count_label.config(text=f"{self.val_ratio.get()*100:.0f}% ({val_count} vzorků)")
@@ -589,18 +688,15 @@ class DigitComposerApp:
             messagebox.showerror("Chyba", f"Součet poměrů musí být 100% (aktuálně {total_ratio*100:.0f}%).")
             return
 
-        # Ask for output directory
-        # Smart initial directory: shared/data with fallback to parent directory
-        program_dir = os.path.dirname(os.path.abspath(__file__))
-        parent_dir = os.path.dirname(program_dir)
-        shared_data_path = os.path.join(parent_dir, "shared", "data")
-
-        initial_dir = parent_dir
-        if os.path.exists(shared_data_path):
-            initial_dir = shared_data_path
+        # Výstup: dialog začíná v shared/data/composed, kterou čte Learner i Tester – stačí potvrdit.
+        try:
+            initial_dir = prepare_default_output_dir()
+        except OSError as e:
+            messagebox.showerror("Chyba", f"Nelze založit výchozí výstupní složku {COMPOSED_DIR}:\n{e}")
+            return
 
         output_dir = filedialog.askdirectory(
-            title="Vyberte výstupní adresář pro komponovaný dataset",
+            title="Výstupní adresář (potvrďte předvybranou složku composed)",
             initialdir=initial_dir,
         )
         if not output_dir:
@@ -620,22 +716,42 @@ class DigitComposerApp:
             )
             return
 
+        # Výstup nesmí obsahovat žádný ze zdrojů – smazáním by se zdroj zničil dřív, než se přečte
+        for source in self.sources:
+            if _is_within(source.data_path, output_abs):
+                messagebox.showerror(
+                    "Neplatný adresář",
+                    f"Výstupní složka obsahuje zdroj [{source.id:02d}]:\n{source.data_path}\n\n"
+                    "Vyberte jinou výstupní složku."
+                )
+                return
+
         # Check if directory exists and is not empty
-        if os.path.exists(output_dir):
-            if os.path.isdir(output_dir) and os.listdir(output_dir):
-                # Directory exists and is NOT empty
-                if not messagebox.askyesno(
+        if os.path.isdir(output_dir) and os.listdir(output_dir):
+            existing = set(os.listdir(output_dir))
+            foreign = sorted(existing - COMPOSED_ENTRIES)
+            if foreign:
+                # Dialog začíná v shared/data – jedno kliknutí vedle by jinak smazalo
+                # collected/ i synthetic/. Mažu jen složku, která vypadá jako composed.
+                messagebox.showerror(
                     "Složka není prázdná",
-                    f"Adresář '{output_dir}' již obsahuje soubory.\n\n"
-                    f"Chcete odstranit veškerý obsah a pokračovat?"
-                ):
-                    return  # User cancelled
-                # User confirmed - delete contents
-                shutil.rmtree(output_dir, ignore_errors=True)
-            # Otherwise: directory exists but is empty - continue without dialog
+                    f"Adresář '{output_dir}' obsahuje i jiná data než train/val/test:\n"
+                    f"{', '.join(foreign[:5])}{' …' if len(foreign) > 5 else ''}\n\n"
+                    "Z bezpečnostních důvodů ho nepřepíšu. Vyberte prázdnou složku "
+                    "nebo dřívější výstup Composeru (např. shared/data/composed)."
+                )
+                return
+            if not messagebox.askyesno(
+                "Složka není prázdná",
+                f"Adresář '{output_dir}' už obsahuje dataset (train/val/test).\n\n"
+                f"Chcete ho odstranit a vytvořit nový?"
+            ):
+                return  # User cancelled
+            for split in SPLIT_NAMES:
+                shutil.rmtree(os.path.join(output_dir, split), ignore_errors=True)
 
         # Create output structure: train/val/test with 0-9 subdirectories
-        for split in ['train', 'val', 'test']:
+        for split in SPLIT_NAMES:
             for class_idx in range(NUM_CLASSES):
                 os.makedirs(os.path.join(output_dir, split, str(class_idx)), exist_ok=True)
 
@@ -712,10 +828,10 @@ class DigitComposerApp:
             # Shuffle files for this class
             random.shuffle(all_files)
 
-            # Split according to ratios
-            n = len(all_files)
-            train_end = int(n * self.train_ratio.get())
-            val_end = train_end + int(n * self.val_ratio.get())
+            # Split according to ratios (největší zbytek, ne zaokrouhlení dolů se zbytkem do testu)
+            n_train, n_val, _ = allocate_counts(len(all_files), self._ratios())
+            train_end = n_train
+            val_end = n_train + n_val
 
             train_files = all_files[:train_end]
             val_files = all_files[train_end:val_end]
@@ -754,6 +870,15 @@ class DigitComposerApp:
             else:
                 result_msg += f"\n(zobrazeno prvních 5)\n" + "\n".join(errors[:5])
 
+        if _same_dir(output_dir, COMPOSED_DIR):
+            if sum(total_copied.values()) > 0:
+                self.composed_written = True
+        else:
+            result_msg += (
+                f"\n\nPOZOR: DigitLearner a DigitTester čtou ve výchozím stavu\n{COMPOSED_DIR}.\n"
+                "Pro tuto složku je spusťte s --data_dir."
+            )
+
         messagebox.showinfo("Hotovo", result_msg)
 
     def cleanup_all_sources(self):
@@ -762,7 +887,32 @@ class DigitComposerApp:
             source.cleanup()
 
 
-if __name__ == "__main__":
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="DigitComposer – sloučení a rozdělení datasetů.")
+    parser.add_argument(
+        "--pipeline",
+        action="store_true",
+        help="Režim start_*.bat: skončí s kódem 1, pokud do shared/data/composed nic nezapsal, "
+             "aby workflow nepokračovalo tréninkem bez dat.",
+    )
+    return parser.parse_args(argv)
+
+
+def pipeline_exit_code(pipeline, composed_written):
+    return 1 if pipeline and not composed_written else 0
+
+
+def main(argv=None):
+    args = parse_args(argv)
     root = tk.Tk()
     app = DigitComposerApp(root)
     root.mainloop()
+    code = pipeline_exit_code(args.pipeline, app.composed_written)
+    if code:
+        print(f"Do {COMPOSED_DIR} se v tomto spuštění nic nezapsalo, workflow nepokračuje.")
+        print("Spusťte ho znovu a v Composeru potvrďte předvybranou složku composed.")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

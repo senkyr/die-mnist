@@ -10,14 +10,22 @@ from tkinter import filedialog, messagebox
 from PIL import Image, ImageDraw
 import numpy as np
 import torch
-from torch import nn
 import json
+import sys
 from pathlib import Path
 
-# Konstanty z DigitCollector
+# Kořen repozitáře do sys.path kvůli sdílenému balíčku die_common.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from die_common.model import load_model  # noqa: E402
+from die_common.paths import MODELS_DIR, ROOT, run_sample_count  # noqa: E402
+
+# Konstanty z DigitCollector – musí sedět s tím, jak se kreslila trénovací data
+# (tloušťka tahu 15 px na plátně 256 px, zmenšení LANCZOS na 32x32), jinak
+# model vidí jinak tlusté tahy, než na jakých se učil.
 CANVAS_SIZE = 256
 IMAGE_SIZE = 32
-BRUSH_WIDTH = 12
+BRUSH_WIDTH = 15
 
 # Dark UI palette matching other tools
 BG_COLOR = "#2b2b2b"
@@ -30,41 +38,6 @@ BUTTON_ACTIVE_FG = "#ffffff"
 BUTTON_BORDER = "#5a5d60"
 BAR_HIGHLIGHT = "#4a9eff"
 BAR_NORMAL = "#3b3f42"
-
-# SimpleCNN třída zkopírovaná z DigitLearner/train.py
-class SimpleCNN(nn.Module):
-    """Malá konvoluční síť vhodná pro 32x32 číslice."""
-
-    def __init__(self, num_classes: int = 10, dropout: float = 0.2) -> None:
-        super().__init__()
-        self.dropout = dropout
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 16x16
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 8x8
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),  # 4x4
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128 * 4 * 4, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout),
-            nn.Linear(128, num_classes),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = self.classifier(x)
-        return x
-
 
 class DigitTeaserApp:
     def __init__(self, master):
@@ -81,6 +54,7 @@ class DigitTeaserApp:
         # Canvas state
         self.last_x, self.last_y = None, None
         self.inference_job = None
+        self.dirty = True  # Přepočítat predikci jen po změně kresby nebo modelu
         self.last_probs = np.ones(10) / 10.0  # Uniform distribution initially
 
         # Setup GUI
@@ -254,14 +228,7 @@ class DigitTeaserApp:
     def _load_model(self):
         """Načte model z vybrané složky."""
         # Smart initial directory: central models directory
-        program_dir = Path(__file__).parent
-        parent_dir = program_dir.parent
-
-        initial_dir = parent_dir
-        central_models = parent_dir / "shared" / "models"
-
-        if central_models.exists():
-            initial_dir = central_models
+        initial_dir = MODELS_DIR if MODELS_DIR.exists() else ROOT
 
         folder = filedialog.askdirectory(
             title="Vyberte složku s modelem (obsahující config.json a digit_cnn.pt)",
@@ -296,46 +263,15 @@ class DigitTeaserApp:
                 config = json.load(f)
 
             dropout = config.get('dropout', 0.2)
+            num_classes = config.get('num_classes', 10)
+            if num_classes != 10:
+                raise ValueError(f"Model má {num_classes} tříd, DigitTeaser umí jen číslice 0-9.")
 
-            # Try to get sample count from test_metrics.json or training_history.json
-            sample_count = None
+            sample_count = run_sample_count(folder_path)
 
-            # Try test_metrics.json first
-            test_metrics_path = folder_path / "test_metrics.json"
-            if test_metrics_path.exists():
-                try:
-                    with open(test_metrics_path, 'r', encoding='utf-8') as f:
-                        test_metrics = json.load(f)
-                        # Look for any key that might indicate sample count
-                        for key in ['num_samples', 'total_samples', 'dataset_size', 'test_samples']:
-                            if key in test_metrics:
-                                sample_count = test_metrics[key]
-                                break
-                except:
-                    pass
-
-            # If not found, try training_history.json
-            if sample_count is None:
-                history_path = folder_path / "training_history.json"
-                if history_path.exists():
-                    try:
-                        with open(history_path, 'r', encoding='utf-8') as f:
-                            history = json.load(f)
-                            # Look for sample count in history metadata
-                            if isinstance(history, dict) and 'num_samples' in history:
-                                sample_count = history['num_samples']
-                            elif isinstance(history, dict) and 'total_samples' in history:
-                                sample_count = history['total_samples']
-                    except:
-                        pass
-
-            # Create model
-            self.model = SimpleCNN(num_classes=10, dropout=dropout)
-
-            # Load weights
-            state_dict = torch.load(model_path, map_location=self.device)
-            self.model.load_state_dict(state_dict)
-            self.model.eval()
+            # Create model and load weights (eval mode)
+            self.model = load_model(model_path, num_classes=10, dropout=dropout, device=self.device)
+            self.dirty = True
 
             # Update UI with model name and optional sample count
             self.model_name = folder_path.name
@@ -366,6 +302,7 @@ class DigitTeaserApp:
         # Reset to uniform probabilities
         self.last_probs = np.ones(10) / 10.0
         self._update_probability_bars(self.last_probs)
+        self.dirty = True
 
     def _start_draw(self, event):
         """Zahájí kreslení."""
@@ -380,11 +317,12 @@ class DigitTeaserApp:
                 fill="white", width=BRUSH_WIDTH, capstyle=tk.ROUND, smooth=True
             )
 
-            # Draw on PIL image
+            # Draw on PIL image (stejně jako DigitCollector)
             self.draw.line(
                 [self.last_x, self.last_y, event.x, event.y],
-                fill=255, width=BRUSH_WIDTH
+                fill=255, width=BRUSH_WIDTH, joint="curve"
             )
+            self.dirty = True
 
         self.last_x, self.last_y = event.x, event.y
 
@@ -411,7 +349,11 @@ class DigitTeaserApp:
         return tensor
 
     def _inference_loop(self):
-        """Hlavní inference smyčka volaná každých 50ms."""
+        """Hlavní inference smyčka volaná každých 50ms (počítá jen po změně)."""
+        if not self.dirty:
+            self._schedule_inference()
+            return
+        self.dirty = False
         if self.model is None:
             # No model loaded, show uniform probabilities
             self.last_probs = np.ones(10) / 10.0

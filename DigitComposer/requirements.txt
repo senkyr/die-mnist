@@ -1,1 +1,2 @@
-Pillow>=11.0.0
+# Závislosti jsou společné pro nástroje téhož druhu (run.bat je instaluje do sdíleného venv).
+-r ../die_common/requirements-base.txt

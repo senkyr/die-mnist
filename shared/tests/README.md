@@ -33,6 +33,8 @@ Každý soubor obsahuje kompletní výsledky testování:
   "overall_accuracy": 0.9523,
   "average_loss": 0.1847,
   "total_samples": 1000,
+  "seen_in_training": 0,
+  "seen_warning": false,
   "num_classes": 10,
   "per_class_metrics": {
     "0": {
