@@ -1,5 +1,6 @@
 """die_common/venv_check.py: pozná venv, ze kterého Windows smazal část souborů v TEMP."""
 
+import importlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,10 @@ class VenvCheckTest(unittest.TestCase):
         self.assertEqual(venv_check.missing_requirements(req, paths=[str(self.site)]),
                          ["chybí balíček bar_baz"])
         fake_package(self.site, "bar-baz")  # jméno se porovnává normalizované (bar_baz = bar-baz)
+        # importlib.metadata drží výpis složky v cache podle jejího mtime. Když se balíček
+        # založí ve stejném tiku hodin jako první dotaz, mtime se nezmění a druhý dotaz by
+        # dostal starý výpis (test pak náhodně padal, v těsné smyčce zhruba v polovině běhů).
+        importlib.invalidate_caches()
         self.assertEqual(venv_check.missing_requirements(req, paths=[str(self.site)]), [])
 
     def test_requirement_names_follow_nested_files(self):
