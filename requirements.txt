@@ -1,0 +1,5 @@
+# Všechny závislosti nástrojů DIE-MNIST: pip install -r requirements.txt
+# Dávky run.bat instalují každému nástroji jen jeho sadu (die_common/requirements-base.txt
+# nebo requirements-torch.txt); tenhle soubor je pro ruční prostředí a pro testy.
+# tkinter tu není a být nemůže: je součástí instalace Pythonu, pip ho nenainstaluje (README → Spuštění).
+-r die_common/requirements-torch.txt

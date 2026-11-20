@@ -2,6 +2,36 @@
 
 Tento projekt obsahuje šest na sebe navazujících aplikací pro sběr, slučování, syntetické generování, učení modelu a testování nad vlastní variantou datasetu ručně psaných číslic.
 
+## Python: verze a instalace
+
+**Potřebuješ Windows a Python 3.11 až 3.15 s Tcl/Tk (`tkinter`). Doporučený je 3.14, na kterém projekt vzniká.** Tkinter není balíček z PyPI, je součástí instalace Pythonu: `requirements.txt` ani `pip` ho nedoplní. Python bez něj se musí přeinstalovat.
+
+Nejjednodušší je Python install manager (příkaz `py`, stáhneš ho z [python.org/downloads/windows](https://www.python.org/downloads/windows/)):
+
+```bat
+py install 3.14
+python --version
+python -c "import tkinter; tkinter.Tk().destroy(); print('tkinter OK')"
+```
+
+- **Dávky volají `python` z `PATH`.** `python --version` proto musí ukázat verzi z rozsahu výše. Install manager dá příkaz `python` nejnovější nainstalované verzi, takže když máš víc verzí, ověř, kterou dostaneš.
+- **Klasický instalátor z python.org:** nech zapnutou volbu „tcl/tk and IDLE“. Ve výchozím stavu zapnutá je, vypnout se dá jen v „Customize installation“.
+- **Nefunguje:** Python 3.10 z install manageru (stahuje se jako NuGet balíček bez Tcl/Tk), embeddable ZIP distribuce a NuGet balíček `python`. Python 3.10 z klasického instalátoru ani verze starší než 3.10 ověřené nejsou.
+- **Po výměně Pythonu smaž složku `%TEMP%\DIE-MNIST`.** Dávky si venv založí jednou a dál ho používají s Pythonem, ze kterého vznikl. Venv založený z Pythonu bez Tkinteru zůstane nefunkční, dokud ho nesmažeš.
+
+Ověřeno 20. 11. 2026 na Windows 11 s Pythony z install manageru 26.4. Závislosti se ve všech verzích nainstalovaly z PyPI (PyTorch 2.15.0, u 3.10 2.14.1):
+
+| Python | Tcl/Tk | Výsledek |
+|---|---|---|
+| 3.10.11 | chybí | okna nejdou. Prošly unit testy (26 testů oken se přeskočilo), DigitDreamer a `train.py`; ostatní nástroje stojí na oknech nebo grafech v Tk |
+| 3.11.9 | 8.6.12 | vše prošlo |
+| 3.12.10 | 8.6.15 | vše prošlo |
+| 3.13.12 | 8.6.15 | vše prošlo |
+| 3.14.3 | 8.6.15 | vše prošlo |
+| 3.15.2 | 9.0.4 | vše prošlo |
+
+„Vše prošlo“ znamená: unit testy, průchod DigitDreamer → `train.py` → `dispatch.py` → DigitTester s vizualizací a otevření oken DigitCollector, DigitComposer, `marshall.py` a DigitTeaser s načtením modelu. Okna se jen otevřela a zavřela, bez kreslení a klikání, a nástroje běžely přímo z venv, ne přes `.bat`.
+
 ## Upozornění
 
 - **Ručně sebraná data nejsou v gitu a nic je nezálohuje.** Složky `shared/data/collected/0`–`9` jsou v `.gitignore`, existují jen na disku. Kdo o ně nechce přijít, ať si je zálohuje sám (ZIP mimo projekt).
@@ -109,7 +139,7 @@ DIE-MNIST/
 
 ## Spuštění
 
-Předpoklady: Windows, Python 3 v `PATH` (běží na 3.14 s PyTorch 2.9) včetně `tkinter` a při prvním spuštění internet kvůli instalaci závislostí. Nic dalšího se neinstaluje ručně, virtuální prostředí si dávky připraví samy.
+Předpoklady: Windows, Python v `PATH` podle [Python: verze a instalace](#python-verze-a-instalace) (3.11 až 3.15 s `tkinter`) a při prvním spuštění internet kvůli instalaci závislostí. Nic dalšího se neinstaluje ručně, virtuální prostředí si dávky připraví samy.
 
 ### Automatizované workflow (doporučeno)
 
@@ -150,9 +180,9 @@ Pro nezávislé spuštění konkrétního nástroje:
 
 Každý skript si připraví virtuální prostředí sám. Nástroje sdílejí dvě: `base` (DigitCollector, Composer, Dreamer) a `torch` (DigitLearner, Tester, Teaser), se závislostmi v `die_common\requirements-base.txt` a `requirements-torch.txt`. Leží v dočasné složce uživatele `%TEMP%\DIE-MNIST\venv-<druh>`, ne v projektu. Projekt bývá v OneDrive a venv s PyTorch (stovky MB, tisíce souborů) se do něj synchronizoval a na jiném stroji nefungoval. Windows obsah TEMP občas maže, a to po souborech. Před každým spuštěním proto `die_common\venv_check.py` ověří, že na disku jsou všechny soubory nainstalovaných balíčků (zhruba 4 s u torch). Chybí-li něco, venv se založí znovu, chybí-li jen celý balíček, doinstaluje se. První spuštění torch nástroje stahuje několik set MB a trvá několik minut. `pip install` se jinak spouští jen při změně requirements (otisk SHA256 ve venv). Společnou logiku drží `die_common\ensure_venv.bat`.
 
-Testy se pouštějí z kořene projektu Pythonem, který má nainstalované závislosti (`python -m unittest discover -s tests`); bez PyTorch se testy modelu a tréninku přeskočí.
+Kořenový `requirements.txt` obsahuje závislosti všech nástrojů (sjednocení obou sad) a slouží pro ruční prostředí a testy. Testy se pouštějí z kořene projektu Pythonem, který má nainstalované závislosti: venv mimo projekt, v něm `pip install -r requirements.txt` a `python -m unittest discover -s tests`. Bez PyTorch se testy modelu a tréninku přeskočí, bez `tkinter` testy oken.
 
-> **Poznámka:** Skripty (`run.bat`, `start_collect.bat`, `start_dream.bat`) jsou psané pro **Windows** (dávkové soubory). Hlavní závislosti jsou `torch`, `numpy`, `Pillow`, `tqdm` a `matplotlib` (`torchvision` potřebuje jen referenční `(OLD)MNIST`); sběrné GUI nástroje (DigitCollector/Composer/Teaser) navíc potřebují `tkinter` (součást standardní instalace Pythonu na Windows).
+> **Poznámka:** Skripty (`run.bat`, `start_collect.bat`, `start_dream.bat`) jsou psané pro **Windows** (dávkové soubory). Hlavní závislosti jsou `torch`, `numpy`, `Pillow`, `tqdm` a `matplotlib` (`torchvision` potřebuje jen referenční `(OLD)MNIST`). Okna (DigitCollector, Composer, Teaser, `marshall.py`, grafy `dispatch.py` a vizualizace Testeru) navíc potřebují `tkinter`, který musí mít samotná instalace Pythonu (viz [Python: verze a instalace](#python-verze-a-instalace)).
 
 ---
 
